@@ -336,7 +336,7 @@
     interstitial: 'ca-app-pub-3940256099942544/1033173712' // Google's official test interstitial
   };
   const PRODUCTS = {   // Play Console product IDs (create these with the same IDs)
-    noads: { id: 'remove_ads', owned: true }, neon: { id: 'skin_neon', owned: true },
+    noads: { id: 'remove_ads', owned: true }, neon: { id: 'skin_neon', owned: true }, premium: { id: 'premium', owned: true },
     tokens: { id: 'continue_tokens_4' }, pack: { id: 'power_pack' },
     jam: { id: 'jam_5' }, guard: { id: 'guard_5' }, armor: { id: 'armor_5' }, pure: { id: 'pure_token' },
   };
@@ -383,14 +383,14 @@
   };
   // Builds without the ad plugin (web, playtest APK) keep the 5-second placeholder ad.
   const adReady = () => (Ads.on ? Ads.rewardedReady : true);
-  // Daily ad schedule (Gee): a free power-up offer after every other run (runs 2, 4, 6, 8, 10; 5 a day),
+  // Daily ad schedule (Gee): a double-coins offer after every other run (runs 2, 4, 6, 8, 10; 5 a day; only if the run earned coins),
   // and a forced ad after runs 3, 7, 11 and so on. Never in a player's first 5 runs ever, never closer than 3 minutes.
   const OFFERS_PER_DAY = 5;
   let adDay = { day: '', runs: 0, offers: 0 };
   try { adDay = Object.assign(adDay, JSON.parse(localStorage.getItem('coverdash-adday') || '{}')); } catch (e) {}
   const saveAdDay = () => { try { localStorage.setItem('coverdash-adday', JSON.stringify(adDay)); } catch (e) {} };
   function adDayRoll() { if (adDay.day !== today()) adDay = { day: today(), runs: 0, offers: 0 }; }
-  let offerOpen = false;   // this game-over screen is showing the power-up offer
+  let offerOpen = false;   // this game-over screen is showing the double-coins offer
   let forced = { runs: 0, at: 0 };
   try { forced = Object.assign(forced, JSON.parse(localStorage.getItem('coverdash-forced') || '{}')); } catch (e) {}
   const saveForced = () => { try { localStorage.setItem('coverdash-forced', JSON.stringify(forced)); } catch (e) {} };
@@ -405,11 +405,11 @@
     if (runsPlayed < FORCED_GRACE || adDay.runs % FORCED_EVERY !== 3 || nowS() - forced.at < FORCED_GAP) return;
     setTimeout(() => { if (state === 'over' && Ads.showInter()) { forced.at = nowS(); saveForced(); } }, 700);
   }
-  function claimOffer() {
-    const type = INV_KEYS[Math.floor(Math.random() * INV_KEYS.length)];
+  function claimOffer() {   // doubles this run's coins (power-ups only come from level-ups and purchases)
     adDayRoll(); adDay.offers += 1; saveAdDay(); offerOpen = false;
-    inv[type] += 1; saveInv();
-    toast = `Stocked 1 ${POWER[type].label}! Tap it in a run to use it`; toastT = 3;
+    const extra = runGain ? runGain.coins : 0;
+    prog.coins += extra; saveProg(); if (runGain) runGain.coins += extra;
+    toast = `Coins doubled! +${extra} more`; toastT = 3;
   }
 
   const Store = {
@@ -440,6 +440,7 @@
       if (!this.S) return;
       if (this.S.owned(PRODUCTS.noads.id) && !noAds) deliver('noads', true);
       if (this.S.owned(PRODUCTS.neon.id) && !skinsOwned.neon) deliver('neon', true);
+      if (this.S.owned(PRODUCTS.premium.id) && !(skinsOwned.obsidian && noAds)) deliver('premium', true);
     },
     price(key, fallback) {
       const p = this.on && this.S.get(PRODUCTS[key].id);
@@ -455,7 +456,12 @@
   const C2code = name => (window.CdvPurchase && window.CdvPurchase.ErrorCode && window.CdvPurchase.ErrorCode[name]);
   // One place that hands out what a purchase or test unlock gives
   function deliver(key, quiet) {
-    if (key === 'noads') { noAds = true; try { localStorage.setItem('coverdash-noads', '1'); } catch (e) {} if (!quiet) toast = 'Ads removed. Thank you!'; }
+    if (key === 'premium') {   // Premium: Remove Ads + 2 exclusive skins (kept on restore) + 5 of each power-up + 500 coins (once)
+      noAds = true; try { localStorage.setItem('coverdash-noads', '1'); } catch (e) {}
+      skinsOwned.obsidian = 1; skinsOwned.aurora = 1; try { localStorage.setItem('coverdash-skins', JSON.stringify(skinsOwned)); } catch (e) {}
+      if (!quiet) { for (const k of INV_KEYS) inv[k] += 5; saveInv(); prog.coins += PREMIUM_COINS; saveProg(); applyTheme('aurora'); toast = 'Premium unlocked. Thank you!'; }
+    }
+    else if (key === 'noads') { noAds = true; try { localStorage.setItem('coverdash-noads', '1'); } catch (e) {} if (!quiet) toast = 'Ads removed. Thank you!'; }
     else if (key === 'neon') { skinsOwned.neon = 1; try { localStorage.setItem('coverdash-skins', JSON.stringify(skinsOwned)); } catch (e) {} if (!quiet) { applyTheme('neon'); toast = 'Neon Grid unlocked'; } }
     else if (key === 'tokens') { tokens += 4; saveTokens(); toast = 'Added 4 continue tokens'; }
     else if (key === 'pure') { pureDay(); pure.bought = 1; savePure(); toast = 'Got 1 Pure Skill play token'; }
@@ -529,6 +535,8 @@
     { id: 'sunset',   name: 'Sunset',    ground: '#2a1b2e', line: '#3a2540', cover: '#ffb38a', player: '#ffd166', coins: 300 },
     { id: 'toxic',    name: 'Toxic',     ground: '#0f1f12', line: '#1a331d', cover: '#9be15d', player: '#e05dff', coins: 800 },
     { id: 'gold',     name: 'Gold Rush', ground: '#1d1a12', line: '#2c2717', cover: '#e8c15a', player: '#ffffff', coins: 2000 },
+    { id: 'obsidian', name: 'Obsidian',  ground: '#0b0b0f', line: '#1d1a24', cover: '#c9a227', player: '#ff3b5c', premium: true },
+    { id: 'aurora',   name: 'Aurora',    ground: '#0c1a2b', line: '#16324a', cover: '#7affc8', player: '#c58bff', premium: true },
   ];
   // Milestone medals: earned by reaching a score, worn on the player circle. Pick one in the Skins screen.
   const MEDALS = [
@@ -553,7 +561,7 @@
   // ---------- XP, levels and coins ----------
   // Each finished run: XP from runXP (soft curve, no cap) and 1 coin per 5 points. Level-ups give 50 coins and a stocked power-up.
   // Coins buy coin-only skins.
-  const XP_BASE = 10, COIN_EVERY = 5, LEVEL_COINS = 50;
+  const XP_BASE = 10, COIN_EVERY = 5, LEVEL_COINS = 50, PREMIUM_COINS = 500;
   // Level n needs 40, 55, 70, 85, 100 ... XP, growing a little faster later (level 10: 190, level 20: 390).
   // New players level every 2-3 runs; later levels take roughly 5-10 runs.
   const xpNeed = lv => 5 * Math.round((40 + 12 * (lv - 1) + 1.5 * Math.pow(lv - 1, 1.5)) / 5);
@@ -575,6 +583,7 @@
     if (ups.length) saveInv();
     saveProg();
     runGain = { xp, coins, ups };
+    if (!coins) offerOpen = false;   // nothing to double
   }
   function drawCoin(x, y, r) {
     ctx.fillStyle = '#a8740a'; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
@@ -583,7 +592,7 @@
   }
   let skinsOwned = {}, skin = 'concrete';
   try { skinsOwned = JSON.parse(localStorage.getItem('coverdash-skins') || '{}'); skin = localStorage.getItem('coverdash-skin') || 'concrete'; } catch (e) {}
-  const skinUnlocked = t => (!t.score && !t.price && !t.coins) || (t.score && best >= t.score) || !!skinsOwned[t.id];
+  const skinUnlocked = t => (!t.score && !t.price && !t.coins && !t.premium) || (t.score && best >= t.score) || !!skinsOwned[t.id];
   function applyTheme(id) {
     const t = THEMES.find(t => t.id === id && skinUnlocked(t)) || THEMES[0];
     skin = t.id;
@@ -1032,13 +1041,14 @@
 
   // Test-mode store: buttons are laid out once and shared by drawing and tapping
   const STORE_BTNS = [
-    { id: 'pack', x: 32, y: 162, w: W - 64, h: 62, price: '$2' },
-    { id: 'jam', x: 32, y: 250, w: W - 64, h: 40, price: '$1' },
-    { id: 'guard', x: 32, y: 296, w: W - 64, h: 40, price: '$1' },
-    { id: 'armor', x: 32, y: 342, w: W - 64, h: 40, price: '$1' },
-    { id: 'tokens', x: 32, y: 394, w: W - 64, h: 44, price: '$1' },
-    { id: 'adtoken', x: 32, y: 444, w: W - 64, h: 44, price: 'AD' },
-    { id: 'noads', x: 32, y: 494, w: W - 64, h: 44, price: '$5' },
+    { id: 'premium', x: 32, y: 160, w: W - 64, h: 56, price: '$10' },
+    { id: 'pack', x: 32, y: 222, w: W - 64, h: 50, price: '$2' },
+    { id: 'jam', x: 32, y: 292, w: W - 64, h: 36, price: '$1' },
+    { id: 'guard', x: 32, y: 332, w: W - 64, h: 36, price: '$1' },
+    { id: 'armor', x: 32, y: 372, w: W - 64, h: 36, price: '$1' },
+    { id: 'tokens', x: 32, y: 414, w: W - 64, h: 40, price: '$1' },
+    { id: 'adtoken', x: 32, y: 458, w: W - 64, h: 40, price: 'AD' },
+    { id: 'noads', x: 32, y: 502, w: W - 64, h: 40, price: '$5' },
     { id: 'back', x: 110, y: 592, w: W - 220, h: 36 },
   ];
   const BTN_STORE = { x: W / 2 - 70, y: 596, w: 140, h: 34 };
@@ -1046,6 +1056,10 @@
   try { noAds = localStorage.getItem('coverdash-noads') === '1'; } catch (e) {}
   function buy(id) {
     if (id === 'back') { toMenu(); return; }
+    if (id === 'premium') {
+      if (skinsOwned.obsidian && skinsOwned.aurora && noAds) { toast = 'Premium already owned'; toastT = 2; return; }
+      purchase('premium'); return;
+    }
     if (id === 'noads') {
       if (noAds) { toast = 'Ads already removed'; toastT = 2; return; }
       purchase('noads'); return;
@@ -1890,11 +1904,12 @@
     drawCoin(W / 2 + 112, 108, 7); ctx.textAlign = 'left'; ctx.fillStyle = '#ffd34d'; ctx.font = `700 13px ${FONT}`;
     ctx.fillText(prog.coins, W / 2 + 123, 113);
     THEMES.forEach((t, i) => {
-      const cw = (W - 64) / 2, x = 28 + (i % 2) * (cw + 8), y = 124 + Math.floor(i / 2) * 84, w = cw, h = 76;
+      const cw = (W - 64) / 2, x = 28 + (i % 2) * (cw + 8), y = 122 + Math.floor(i / 2) * 68, w = cw, h = 62;
       const open = skinUnlocked(t), on = skin === t.id;
       uiHits.push({ x, y, w, h, action: () => {
         if (open) { applyTheme(t.id); return; }
         if (t.price) { purchase(t.id); return; }
+        if (t.premium) { state = 'store'; return; }
         if (t.coins) {
           if (prog.coins >= t.coins) {
             prog.coins -= t.coins; saveProg();
@@ -1906,28 +1921,28 @@
       ctx.fillStyle = on ? 'rgba(238,241,246,0.12)' : 'rgba(238,241,246,0.05)'; ctx.fillRect(x, y, w, h);
       ctx.strokeStyle = on ? C.player : 'rgba(238,241,246,0.25)'; ctx.lineWidth = on ? 2 : 1; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
       // little preview of the skin
-      const px = x + 6, py = y + 6, pw = w - 12, ph = 32;
+      const px = x + 5, py = y + 5, pw = w - 10, ph = 26;
       ctx.fillStyle = t.ground; ctx.fillRect(px, py, pw, ph);
       ctx.strokeStyle = t.line; ctx.lineWidth = 1; ctx.beginPath();
       for (let gx = px + 12; gx < px + pw; gx += 16) { ctx.moveTo(gx, py); ctx.lineTo(gx, py + ph); }
       ctx.stroke();
-      ctx.fillStyle = t.cover; ctx.fillRect(px + 16, py + 8, 50, 8);
-      ctx.fillStyle = t.player; ctx.beginPath(); ctx.arc(px + pw - 36, py + 19, 7, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = t.cover; ctx.fillRect(px + 16, py + 6, 50, 8);
+      ctx.fillStyle = t.player; ctx.beginPath(); ctx.arc(px + pw - 36, py + 16, 7, 0, Math.PI * 2); ctx.fill();
       if (!open) { ctx.fillStyle = 'rgba(10,14,20,0.55)'; ctx.fillRect(px, py, pw, ph); }
       ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.font = `700 13px ${FONT}`;
-      ctx.fillText(t.name, x + 8, y + 54);
+      ctx.fillText(t.name, x + 8, y + 45);
       ctx.font = `600 10px ${FONT}`; ctx.fillStyle = on ? C.player : 'rgba(238,241,246,0.6)';
-      let status = on ? 'EQUIPPED' : open ? 'Tap to equip' : t.price ? `${Store.price(t.id, t.price)} · tap to buy${Store.on ? '' : ' (test)'}` : t.coins ? `${t.coins} coins · tap to unlock` : `Reach ${t.score} to unlock`;
-      if (!open && t.coins) { drawCoin(x + 13, y + 66, 5); ctx.fillStyle = prog.coins >= t.coins ? '#ffd34d' : 'rgba(238,241,246,0.6)'; ctx.fillText(status, x + 22, y + 70); }
-      else ctx.fillText(status, x + 8, y + 70);
+      let status = on ? 'EQUIPPED' : open ? 'Tap to equip' : t.price ? `${Store.price(t.id, t.price)} · tap to buy${Store.on ? '' : ' (test)'}` : t.coins ? `${t.coins} coins · tap to unlock` : t.premium ? '★ In the Premium pack' : `Reach ${t.score} to unlock`;
+      if (!open && t.coins) { drawCoin(x + 13, y + 54, 5); ctx.fillStyle = prog.coins >= t.coins ? '#ffd34d' : 'rgba(238,241,246,0.6)'; ctx.fillText(status, x + 22, y + 58); }
+      else ctx.fillText(status, x + 8, y + 58);
     });
     // Medal row: worn on your circle. Earned by reaching a score.
-    ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.font = `700 13px ${FONT}`; ctx.fillText('MEDAL', 30, 470);
+    ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.font = `700 13px ${FONT}`; ctx.fillText('MEDAL', 30, 482);
     ctx.fillStyle = 'rgba(238,241,246,0.55)'; ctx.font = `600 11px ${FONT}`;
-    ctx.fillText('Reach 50 / 100 / 200 / 300 to earn', 82, 470);
+    ctx.fillText('Reach 50 / 100 / 200 / 300 to earn', 82, 482);
     const opts = [{ id: 'none', name: 'None', score: 0 }].concat(MEDALS), cw = (W - 56 - 4 * 6) / 5;
     opts.forEach((m, i) => {
-      const x = 28 + i * (cw + 6), y = 480, got = m.id === 'none' || medalEarned(m), on = medal === m.id || (m.id === 'none' && !MEDALS.some(q => q.id === medal && medalEarned(q)));
+      const x = 28 + i * (cw + 6), y = 490, got = m.id === 'none' || medalEarned(m), on = medal === m.id || (m.id === 'none' && !MEDALS.some(q => q.id === medal && medalEarned(q)));
       uiHits.push({ x, y, w: cw, h: 54, action: () => { if (got) { medal = m.id; saveMedal(); } else { toast = `Reach ${m.score} to earn ${m.name}`; toastT = 2; } } });
       ctx.fillStyle = on ? 'rgba(238,241,246,0.12)' : 'rgba(238,241,246,0.05)'; ctx.fillRect(x, y, cw, 54);
       ctx.strokeStyle = on ? C.player : 'rgba(238,241,246,0.25)'; ctx.lineWidth = on ? 2 : 1; ctx.strokeRect(x + 0.5, y + 0.5, cw - 1, 53);
@@ -1970,7 +1985,7 @@
     for (const b of STORE_BTNS) {
       const back = b.id === 'back';
       ctx.fillStyle = 'rgba(238,241,246,0.07)'; ctx.fillRect(b.x, b.y, b.w, b.h);
-      ctx.strokeStyle = back ? 'rgba(238,241,246,0.35)' : 'rgba(242,193,78,0.45)'; ctx.lineWidth = 1;
+      ctx.strokeStyle = back ? 'rgba(238,241,246,0.35)' : b.id === 'premium' ? C.player : 'rgba(242,193,78,0.45)'; ctx.lineWidth = b.id === 'premium' ? 2 : 1;
       ctx.strokeRect(b.x + 0.5, b.y + 0.5, b.w - 1, b.h - 1);
       if (back) { ctx.fillStyle = C.ink; ctx.font = `700 14px ${FONT}`; ctx.textAlign = 'center'; ctx.fillText('BACK', W / 2, b.y + 23); continue; }
       // price tag
@@ -1978,27 +1993,34 @@
       ctx.fillStyle = '#141a24'; ctx.font = `700 16px ${FONT}`; ctx.textAlign = 'center';
       ctx.fillText(b.id === 'adtoken' ? (noAds ? 'FREE' : 'AD') : Store.price(b.id, b.price), b.x + b.w - 35, b.y + b.h / 2 + 6);
       ctx.textAlign = 'left';
-      if (b.id === 'pack') {
-        INV_KEYS.forEach((k, i) => powerGlyph(k, b.x + 22 + i * 22, b.y + 24, 7, POWER[k].color));
-        ctx.fillStyle = C.ink; ctx.font = `700 15px ${FONT}`; ctx.fillText('POWER PACK', b.x + 14, b.y + 48);
-        ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 12px ${FONT}`; ctx.fillText('5 of each power-up', b.x + 90, b.y + 28);
+      if (b.id === 'premium') {
+        const own = skinsOwned.obsidian && skinsOwned.aurora && noAds;
+        ctx.fillStyle = C.player; ctx.font = `700 15px ${FONT}`; ctx.fillText(own ? 'PREMIUM ✓' : 'PREMIUM', b.x + 14, b.y + 19);
+        ctx.fillStyle = 'rgba(238,241,246,0.55)'; ctx.font = `700 10px ${FONT}`; ctx.fillText(own ? 'THANK YOU!' : 'BEST VALUE', b.x + (own ? 116 : 98), b.y + 18);
+        ctx.fillStyle = 'rgba(238,241,246,0.75)'; ctx.font = `600 11px ${FONT}`;
+        ctx.fillText('No ads · 5 of each power-up', b.x + 14, b.y + 35);
+        ctx.fillText(`${PREMIUM_COINS} coins · 2 exclusive skins`, b.x + 14, b.y + 49);
+      } else if (b.id === 'pack') {
+        INV_KEYS.forEach((k, i) => powerGlyph(k, b.x + 22 + i * 22, b.y + 18, 7, POWER[k].color));
+        ctx.fillStyle = C.ink; ctx.font = `700 15px ${FONT}`; ctx.fillText('POWER PACK', b.x + 14, b.y + 41);
+        ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 12px ${FONT}`; ctx.fillText('5 of each power-up', b.x + 90, b.y + 22);
       } else if (b.id === 'tokens' || b.id === 'adtoken') {
         drawToken(b.x + 24, b.y + b.h / 2, 11);
         ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.font = `700 15px ${FONT}`;
-        ctx.fillText(b.id === 'tokens' ? '4 CONTINUE TOKENS' : 'FREE CONTINUE TOKEN', b.x + 46, b.y + 19);
+        ctx.fillText(b.id === 'tokens' ? '4 CONTINUE TOKENS' : 'FREE CONTINUE TOKEN', b.x + 46, b.y + 17);
         ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 11px ${FONT}`;
-        ctx.fillText(b.id === 'tokens' ? `Revive after a shot · you have ${tokens}` : `${noAds ? 'Free, no ad' : 'Watch an ad'} · ${adTokensLeft()} of ${AD_TOKENS_PER_DAY} left today`, b.x + 46, b.y + 34);
+        ctx.fillText(b.id === 'tokens' ? `Revive after a shot · you have ${tokens}` : `${noAds ? 'Free, no ad' : 'Watch an ad'} · ${adTokensLeft()} of ${AD_TOKENS_PER_DAY} left today`, b.x + 46, b.y + 32);
       } else if (b.id === 'noads') {
-        ctx.fillStyle = C.ink; ctx.font = `700 15px ${FONT}`; ctx.fillText(noAds ? 'ADS REMOVED ✓' : 'REMOVE ADS', b.x + 14, b.y + 19);
-        ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 11px ${FONT}`; ctx.fillText('One-time · revive and daily tokens skip ads', b.x + 14, b.y + 34);
+        ctx.fillStyle = C.ink; ctx.font = `700 15px ${FONT}`; ctx.fillText(noAds ? 'ADS REMOVED ✓' : 'REMOVE ADS', b.x + 14, b.y + 17);
+        ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 11px ${FONT}`; ctx.fillText('One-time · no forced ads, ad rewards free', b.x + 14, b.y + 32);
       } else {
         powerGlyph(b.id, b.x + 24, b.y + b.h / 2, 8, POWER[b.id].color);
-        ctx.fillStyle = C.ink; ctx.font = `700 14px ${FONT}`; ctx.fillText(`5 × ${POWER[b.id].label}  (single-use)`, b.x + 46, b.y + 17);
-        ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 11px ${FONT}`; ctx.fillText(POWER[b.id].desc, b.x + 46, b.y + 32);
+        ctx.fillStyle = C.ink; ctx.font = `700 14px ${FONT}`; ctx.fillText(`5 × ${POWER[b.id].label}  (single-use)`, b.x + 46, b.y + 15);
+        ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 11px ${FONT}`; ctx.fillText(POWER[b.id].desc, b.x + 46, b.y + 29);
       }
     }
     ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 12px ${FONT}`;
-    ctx.fillText('OR PICK ONE', 32, 243);
+    ctx.fillText('OR PICK ONE', 32, 286);
     ctx.textAlign = 'center'; ctx.font = `600 12px ${FONT}`;
     if (toastT > 0) { ctx.fillStyle = C.player; ctx.font = `700 13px ${FONT}`; ctx.fillText(toast + (Store.on ? '' : ' (simulated)'), W / 2, 568); }
     else { ctx.fillStyle = C.ink; ctx.fillText(`You have: ${INV_KEYS.map(k => `${POWER[k].label} ${inv[k]}`).join(' · ')} · TOKENS ${tokens}`, W / 2, 568); }
@@ -2093,11 +2115,11 @@
     else notes.push(`${RUNS_PER_TOKEN - runsPlayed % RUNS_PER_TOKEN} MORE RUNS TO A FREE TOKEN`);
     notes.slice(0, 2).forEach((n, i) => { ctx.globalAlpha = /^(\+|SKIN|MEDAL|SO CLOSE|TIED|LEVEL)/.test(n) ? 1 : 0.6; ctx.fillText(n, W / 2, 330 + i * 16); });
     ctx.globalAlpha = 1;
-    // Every other run: watch an ad (free with Remove Ads) to stock a random power-up. 5 a day.
-    if (offerOpen) {
-      uiBtn(44, 484, W - 88, 46, noAds ? 'CLAIM A FREE POWER-UP' : '▶ WATCH AD: FREE POWER-UP', () => {
+    // Every other run: watch an ad (free with Remove Ads) to double this run's coins. 5 a day.
+    if (offerOpen && runGain) {
+      uiBtn(44, 484, W - 88, 46, noAds ? `DOUBLE MY COINS (+${runGain.coins})` : `▶ WATCH AD: DOUBLE COINS (+${runGain.coins})`, () => {
         if (noAds) claimOffer(); else startAd('offer');
-      }, 'accent', `Random power-up for your stock · ${OFFERS_PER_DAY - adDay.offers} left today`);
+      }, 'accent', `${OFFERS_PER_DAY - adDay.offers} left today`);
     } else if (toastT > 0) { ctx.fillStyle = C.player; ctx.font = `700 13px ${FONT}`; ctx.fillText(toast, W / 2, 506); }
     uiBtn(60, 366, W - 120, 46, runMode === 'pure' ? (pureLeft() > 0 ? `PLAY AGAIN · ${pureLeft()} TOKEN${pureLeft() === 1 ? '' : 'S'} LEFT` : 'GET MORE TOKENS') : 'PLAY AGAIN', replay, 'primary');
     uiBtn(60, 420, (W - 128) / 2, 36, 'MENU', toMenu, 'ghost');
@@ -2127,7 +2149,7 @@
     ctx.font = `700 22px ${FONT}`; ctx.fillText('AD PLACEHOLDER', W / 2, 290);
     ctx.font = `600 13px ${FONT}`; ctx.fillText('A real rewarded ad will play here', W / 2, 316);
     ctx.fillStyle = C.player; ctx.font = `700 16px ${FONT}`;
-    ctx.fillText(adPurpose === 'offer' ? `Your power-up arrives in ${Math.ceil(adLeft)}…` : adPurpose !== 'revive' ? `Your token arrives in ${Math.ceil(adLeft)}…` : `Back in the fight in ${Math.ceil(adLeft)}…`, W / 2, 470);
+    ctx.fillText(adPurpose === 'offer' ? `Your coins arrive in ${Math.ceil(adLeft)}…` : adPurpose !== 'revive' ? `Your token arrives in ${Math.ceil(adLeft)}…` : `Back in the fight in ${Math.ceil(adLeft)}…`, W / 2, 470);
   }
 
   // ---------- Input ----------
@@ -2163,7 +2185,7 @@
   }
   requestAnimationFrame(frame);
   Ads.init(); Store.init();
-  window.__game = { get tokens() { return tokens; }, get runs() { return runsPlayed; }, get state() { return state; }, get hint() { return hint; }, get skin() { return skin; }, get score() { return score; }, get flankers() { return flankers; }, get camY() { return camY; }, get pickups() { return pickups; }, get jam() { return jam; }, get guard() { return guard; }, get flankerAlive() { return flankers.length > 0; }, get player() { return player; }, get armor() { return armor; }, get rate() { return attackRate(); }, get inv() { return inv; }, get turrets() { return turrets; }, get best() { return [best, bestRate]; }, covers() { return liveCovers(camY, camY + H).map(c => ({ cx: c.cx, cy: c.cy, pts: c.pts, shape: c.shape, hp: c.hp })); }, path: findPath, get boardResult() { return boardResult; }, useStock, get pureLeft() { return pureLeft(); }, get mode() { return runMode; }, layout() { return rows.slice(0, 20).map(r => r.covers.map(c => c.shape + '@' + c.lane + ':' + c.pts[0].map(Math.round).join(',')).join('|')).join(' / '); }, rateAt(v) { const s0 = score; score = v; const r = attackRate(); score = s0; return r; }, kill() { if (state === "play") hitPlayer(); }, gates() { return rows.map(r => r.gate).filter(Boolean); }, get invFlash() { return invFlash; }, stockBlocked, markAhead() { const cs = liveCovers(camY, camY + H); for (const c of cs) { c.power = "jam"; c.hp = 1; } return cs.length; }, get prog() { return prog; }, get offerOpen() { return offerOpen; }, get adDay() { return adDay; }, get boost() { return [boostEnd, boostBlink]; }, forceGate() { const r = score + 1, row = rowAt(r), lane = [0, 1, 2].find(l => !row.covers.some(c => c.lane === l) && !rowAt(score).covers.some(c => c.lane === l)); if (lane === undefined) return null; row.gate = { x: LANES[lane], y: -r * GAP + 100, used: false, charged: false, chargeT: 0 }; return row.gate; } };
+  window.__game = { get tokens() { return tokens; }, get runs() { return runsPlayed; }, get state() { return state; }, get hint() { return hint; }, get skin() { return skin; }, get score() { return score; }, get flankers() { return flankers; }, get camY() { return camY; }, get pickups() { return pickups; }, get jam() { return jam; }, get guard() { return guard; }, get flankerAlive() { return flankers.length > 0; }, get player() { return player; }, get armor() { return armor; }, get rate() { return attackRate(); }, get inv() { return inv; }, get turrets() { return turrets; }, get best() { return [best, bestRate]; }, covers() { return liveCovers(camY, camY + H).map(c => ({ cx: c.cx, cy: c.cy, pts: c.pts, shape: c.shape, hp: c.hp })); }, path: findPath, get boardResult() { return boardResult; }, useStock, get pureLeft() { return pureLeft(); }, get mode() { return runMode; }, layout() { return rows.slice(0, 20).map(r => r.covers.map(c => c.shape + '@' + c.lane + ':' + c.pts[0].map(Math.round).join(',')).join('|')).join(' / '); }, rateAt(v) { const s0 = score; score = v; const r = attackRate(); score = s0; return r; }, kill() { if (state === "play") hitPlayer(); }, setScore(v) { score = v; }, endRun() { if (state === "over" && canRevive) endRun(); }, gates() { return rows.map(r => r.gate).filter(Boolean); }, get invFlash() { return invFlash; }, stockBlocked, markAhead() { const cs = liveCovers(camY, camY + H); for (const c of cs) { c.power = "jam"; c.hp = 1; } return cs.length; }, get prog() { return prog; }, get offerOpen() { return offerOpen; }, get adDay() { return adDay; }, get boost() { return [boostEnd, boostBlink]; }, forceGate() { const r = score + 1, row = rowAt(r), lane = [0, 1, 2].find(l => !row.covers.some(c => c.lane === l) && !rowAt(score).covers.some(c => c.lane === l)); if (lane === undefined) return null; row.gate = { x: LANES[lane], y: -r * GAP + 100, used: false, charged: false, chargeT: 0 }; return row.gate; } };
 })();
 </script>
 </body></html>
