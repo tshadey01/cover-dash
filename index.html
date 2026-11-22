@@ -1,0 +1,1592 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#10151d">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Cover Dash">
+<title>Cover Dash</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@600;700&display=swap">
+<style>
+  /* Layout: one full-screen portrait canvas (360x640 logical), letterboxed and centered. Single dark look by design. */
+  :root {
+    --ground: #1c2431;
+    --ground-line: #263042;
+    --concrete: #9aa3b2;
+    --player: #f2c14e;
+    --enemy: #ff5a4f;
+    --ink: #eef1f6;
+    --font-display: "Chakra Petch", "Arial Narrow", system-ui, sans-serif;
+    color-scheme: dark;
+  }
+  html { height: 100%; box-sizing: border-box; background: #10151d; }
+  body { height: 100%; margin: 0; background: #10151d; color: var(--ink); overflow: hidden; }
+  #stage { height: 100%; display: grid; place-items: center; }
+  canvas { display: block; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; cursor: pointer; border-radius: 6px; }
+  canvas:focus-visible { outline: 2px solid var(--player); outline-offset: 2px; }
+</style>
+
+</head><body>
+<div id="stage"><canvas id="game" tabindex="0" aria-label="Cover Dash game"></canvas></div>
+<script>
+(() => {
+  // ---------- Tunables (easy to tweak) ----------
+  const W = 360, H = 640;               // logical screen size
+  const LANES = [78, 180, 282];         // x positions cover can sit at
+  const GAP = 150;                      // vertical distance between cover rows
+  const MOVE_SPEED = 430;               // how fast the player runs, pixels per second
+  const SNAP = 30;                      // taps this close to cover snap you against it
+  const ARMOR_MAX = 2;                  // armor stacks
+  const THICK = [0.7, 1.3];             // cover size varies by about 30% either way
+  const FLAT_HP = 3, TRI_HP = 4;        // hits a cover takes before it breaks
+  const SHAPE_HP = { flat: FLAT_HP, tri: TRI_HP, circle: 4, semi: 3 };
+  const SIZE = [0.75, 1.25];            // rectangle length and width vary by 25% either way
+  const SHAPE_MIX = [['flat', 0.5], ['circle', 0.2], ['semi', 0.15], ['tri', 0.15]]; // how often each cover shape appears
+  const PLAYER_R = 11, BULLET_R = 4;
+  const HIT_R = PLAYER_R * 0.8;          // fairness: the player's hitbox is a bit smaller than the drawn circle
+  const TURRET_Y = 58;                  // turret row, in screen pixels from the top
+  const PLAYER_SCREEN_Y = 450;          // where the camera keeps the player
+  const FLANK_START = 3;                // score when side attackers begin
+  const JAM_TIME = 6, GUARD_TIME = 10;  // power-up durations in seconds
+  const GATE_CHANCE = 0.01;             // chance any row of cover comes with an acceleration gate (1%)
+  const GATE_HALF = 30;                 // half the width of a gate's opening
+  const BOOST_POINTS = 10;              // a gate boosts you for this many points of cover
+  const BOOST_SPEED = 2;                // run speed multiplier while boosted
+  const BOOST_BLINKS = 3, BLINK_TIME = 0.4; // warning blinks (still safe) before you can be hit again
+  const POWER_CHANCE = 0.025;          // chance any cover is a marked power-up cover
+  const PICKUP_LIFE = 9;                // seconds a dropped power-up stays before fading
+  // Attack speed (how often enemies fire). 1 = starting pace.
+  const RATE_STEP = 0.10;               // +10% fire rate every 10 points, no ceiling (300 points = 4x)
+  const BASE_PERIOD = 2.6;              // average seconds between shots per top gun at 1x
+  const MIN_AIM = 0.42, MIN_LOCK = 0.32; // fairness: warnings never get shorter than this (0.74s total)
+  const BURST_GAP = 0.13;               // seconds between shots when a gun fires a quick burst
+  const MAX_FLANKERS = 4;               // most side attackers on screen at once
+  const FLANK_EVERY = 40;               // one more side attacker allowed every 40 points
+  const FLANK_GAP = 0.9;                // side attackers never fire within this many seconds of each other
+  const NEAR_BEST = 0.6;                // how hard the ramp near your high score pushes
+  const REVIVE_CUT = 0.78;              // reviving cuts attack speed by 22%
+  const AD_SECONDS = 5;                 // length of the simulated ad
+  const DRIFT_START = 20;               // score when the top guns start drifting side to side
+  const DRIFT_SPEED = 28, DRIFT_RANGE = 42; // base drift speed (px/s) and how far each gun wanders from its spot
+  const SHOW_ATTACK = false;            // tuning readout of attack speed in the corner
+  const LEAD_START = 10, LEAD_FULL = 120; // top guns start leading your movement at 10 points, fully at 120
+  const LEAD_BULLET_GAIN = 160;         // extra bullet speed as their aim improves
+  const BULLET_SPEED = 520, BULLET_SPEED_GAIN = 240, SIDE_BULLET_SPEED = 500;
+  const POWER = {
+    jam:   { color: '#5fb4ff', label: 'JAM',   hud: 'TOP GUNS JAMMED', desc: 'Stops the top guns for 6s' },
+    guard: { color: '#6ee7a0', label: 'GUARD', hud: 'AUTO-GUARD', desc: 'Shoots side attackers for 10s' },
+    armor: { color: '#c9a7ff', label: 'ARMOR', hud: 'ARMOR', desc: 'Blocks 1 shot · hold up to 2' },
+  };
+
+  const css = getComputedStyle(document.documentElement);
+  const C = {
+    ground: css.getPropertyValue('--ground').trim(),
+    line: css.getPropertyValue('--ground-line').trim(),
+    concrete: css.getPropertyValue('--concrete').trim(),
+    player: css.getPropertyValue('--player').trim(),
+    enemy: css.getPropertyValue('--enemy').trim(),
+    ink: css.getPropertyValue('--ink').trim(),
+  };
+  const FONT = css.getPropertyValue('--font-display').trim();
+
+  const cvs = document.getElementById('game');
+  const ctx = cvs.getContext('2d');
+  const stage = document.getElementById('stage');
+
+  function resize() {
+    const s = Math.min(stage.clientWidth / W, stage.clientHeight / H);
+    const dpr = window.devicePixelRatio || 1;
+    cvs.style.width = W * s + 'px';
+    cvs.style.height = H * s + 'px';
+    cvs.width = Math.round(W * s * dpr);
+    cvs.height = Math.round(H * s * dpr);
+    ctx.setTransform(s * dpr, 0, 0, s * dpr, 0, 0);
+  }
+  addEventListener('resize', resize);
+  resize();
+
+  // ---------- Helpers ----------
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const randInt = (a, b) => Math.floor(rand(a, b + 1));
+  const lerp = (a, b, k) => a + (b - a) * k;
+  const ease = k => k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+  // High score, plus the attack speed you were facing when you set it
+  let best = 0, bestRate = 1;
+  try { best = +localStorage.getItem('coverdash-best') || 0; bestRate = +localStorage.getItem('coverdash-best-rate') || 1; } catch (e) {}
+
+  // ---------- Game state ----------
+  let state = 'title';   // title (main menu) | play | paused | dying | over | ad | share | store | skins | settings
+  let beams = [], boostEnd = 0, boostBlink = 0, adUsed, tokensUsed, earnedToken, adPurpose, sharePlatform, scorePop, bestFlashT, passedBest, newSkins, firstRun, revived, reviveMul, invuln, adLeft, deathRate, canRevive, firstPowerRow, rows, nextFork, player, armor, pickups, jam, guard, guardCd, drone, turrets, flankers, flankTimer, lastFlankShot, gameT, bullets, parts, camY, score, shake, flash, overAt, newBest;
+
+  // ---------- Settings (kept between sessions) ----------
+  const settings = { sfx: true, music: true, vibe: true };
+  try { Object.assign(settings, JSON.parse(localStorage.getItem('coverdash-settings') || '{}')); } catch (e) {}
+  const saveSettings = () => { try { localStorage.setItem('coverdash-settings', JSON.stringify(settings)); } catch (e) {} };
+
+  // ---------- Sound: synthesized with Web Audio, so there are no sound files to license ----------
+  let ac = null, sfxBus = null, musicBus = null, noiseBuf = null;
+  function audioInit() {
+    if (ac) { if (ac.state === 'suspended') ac.resume(); return; }
+    try {
+      ac = new (window.AudioContext || window.webkitAudioContext)();
+      const master = ac.createGain(); master.gain.value = 0.8; master.connect(ac.destination);
+      sfxBus = ac.createGain(); sfxBus.connect(master);
+      musicBus = ac.createGain(); musicBus.gain.value = 0; musicBus.connect(master);
+      noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      setInterval(musicTick, 50);
+    } catch (e) { ac = null; }
+  }
+  function tone(f, dur, type, vol, f2, when, bus) {
+    const t0 = when || ac.currentTime, o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.setValueAtTime(f, t0);
+    if (f2) o.frequency.exponentialRampToValueAtTime(f2, t0 + dur);
+    g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g); g.connect(bus || sfxBus); o.start(t0); o.stop(t0 + dur + 0.02);
+  }
+  function noise(dur, vol, freq, type, when, bus) {
+    const t0 = when || ac.currentTime, s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+    s.buffer = noiseBuf; f.type = type || 'lowpass'; f.frequency.value = freq;
+    g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    s.connect(f); f.connect(g); g.connect(bus || sfxBus); s.start(t0, Math.random() * 0.5); s.stop(t0 + dur + 0.02);
+  }
+  const SFX = {
+    click: () => tone(660, 0.05, 'square', 0.05),
+    shot: () => { noise(0.08, 0.07, 1800, 'bandpass'); tone(220, 0.07, 'square', 0.025, 110); },
+    lock: () => tone(1320, 0.05, 'sine', 0.035),
+    coverHit: () => noise(0.06, 0.09, 3000, 'highpass'),
+    coverBreak: () => { noise(0.35, 0.25, 700); tone(90, 0.25, 'sine', 0.25, 40); },
+    hurt: () => { noise(0.5, 0.35, 1200); tone(300, 0.5, 'sawtooth', 0.14, 50); },
+    block: () => { tone(1800, 0.15, 'triangle', 0.12, 900); tone(2700, 0.1, 'sine', 0.05); },
+    run: () => noise(0.12, 0.05, 900, 'bandpass'),
+    power: () => [523, 659, 784, 1047].forEach((f, i) => tone(f, 0.12, 'square', 0.05, null, ac.currentTime + i * 0.06)),
+    warn: () => { tone(880, 0.09, 'square', 0.045); tone(660, 0.09, 'square', 0.045, null, ac.currentTime + 0.11); },
+    best: () => [659, 784, 988, 1319].forEach((f, i) => tone(f, 0.16, 'triangle', 0.08, null, ac.currentTime + i * 0.09)),
+    drone: () => tone(1500, 0.04, 'square', 0.02, 1900),
+    gate: () => { tone(300, 0.35, 'sawtooth', 0.08, 1400); tone(600, 0.3, 'square', 0.04, 2400); },
+    charge: () => { tone(200, 0.5, 'sawtooth', 0.07, 1800); noise(0.15, 0.05, 3000, 'bandpass'); },
+    unboost: () => { tone(900, 0.25, 'triangle', 0.07, 400); },
+    zap: () => { tone(2400, 0.12, 'sawtooth', 0.06, 600); noise(0.08, 0.05, 5000, 'highpass'); },
+    kill: () => { noise(0.2, 0.15, 1500); tone(600, 0.15, 'square', 0.05, 150); },
+    revive: () => [392, 523, 659, 784].forEach((f, i) => tone(f, 0.2, 'triangle', 0.08, null, ac.currentTime + i * 0.08)),
+  };
+  function sfx(name) { if (ac && settings.sfx) try { SFX[name](); } catch (e) {} }
+  // Vibration: works in the Android app; browsers and iOS mostly ignore it (iOS needs the app's haptics plugin).
+  function vibrate(p) { if (settings.vibe) try { navigator.vibrate && navigator.vibrate(p); } catch (e) {} }
+
+  // Music: a short looping groove, scheduled a moment ahead so it stays in time
+  const STEP = 60 / 112 / 4;
+  const BASS = [45, 0, 45, 0, 48, 0, 45, 0, 43, 0, 43, 0, 40, 0, 43, 0];
+  const midi = n => 440 * Math.pow(2, (n - 69) / 12);
+  let nextStep = 0, stepIdx = 0;
+  function musicTick() {
+    if (!ac) return;
+    const want = !settings.music ? 0 : state === 'play' ? 0.45 : state === 'paused' || state === 'ad' ? 0.08 : 0.25;
+    musicBus.gain.setTargetAtTime(want, ac.currentTime, 0.3);
+    if (!settings.music) return;
+    if (nextStep < ac.currentTime) nextStep = ac.currentTime + 0.05;
+    while (nextStep < ac.currentTime + 0.2) {
+      const s = stepIdx % 16, shift = [0, 0, 3, -2][Math.floor(stepIdx / 16) % 4];
+      if (BASS[s]) tone(midi(BASS[s] + shift), STEP * 1.8, 'triangle', 0.18, null, nextStep, musicBus);
+      if (s % 4 === 0) tone(110, 0.12, 'sine', 0.3, 40, nextStep, musicBus);
+      if (s % 4 === 2) noise(0.04, 0.05, 7000, 'highpass', nextStep, musicBus);
+      if (s === 4 || s === 12) noise(0.1, 0.07, 1800, 'bandpass', nextStep, musicBus);
+      nextStep += STEP; stepIdx++;
+    }
+  }
+
+  // ---------- Continue tokens ("quarters"): stocked between runs ----------
+  // Ads: the real app asks the ad network here. The revive offer only appears once an ad has loaded,
+  // so a player never taps a button that leads nowhere. There are no forced ads between runs.
+  const adReady = () => true;
+  const TOKENS_PER_RUN = 2;     // most tokens usable in one run, on top of the free ad revive
+  const AD_TOKENS_PER_DAY = 3;
+  const RUNS_PER_TOKEN = 10;
+  let tokens = 0, runsPlayed = 0, adTokenDay = '', adTokensToday = 0;
+  try {
+    tokens = +localStorage.getItem('coverdash-tokens') || 0;
+    runsPlayed = +localStorage.getItem('coverdash-runs') || 0;
+    [adTokenDay, adTokensToday] = JSON.parse(localStorage.getItem('coverdash-adtokens') || '["",0]');
+  } catch (e) {}
+  const today = () => new Date().toDateString();
+  const adTokensLeft = () => AD_TOKENS_PER_DAY - (adTokenDay === today() ? adTokensToday : 0);
+  function saveTokens() {
+    try {
+      localStorage.setItem('coverdash-tokens', tokens); localStorage.setItem('coverdash-runs', runsPlayed);
+      localStorage.setItem('coverdash-adtokens', JSON.stringify([adTokenDay, adTokensToday]));
+    } catch (e) {}
+  }
+
+  // ---------- Theme skins: unlocked by reaching a score, or bought ----------
+  const THEMES = [
+    { id: 'concrete', name: 'Concrete',  ground: '#1c2431', line: '#263042', cover: '#9aa3b2', player: '#f2c14e', how: 'Starter skin' },
+    { id: 'desert',   name: 'Desert Ops', ground: '#33291d', line: '#41352a', cover: '#c9a875', player: '#7fd1ff', score: 25 },
+    { id: 'arctic',   name: 'Arctic',    ground: '#22323f', line: '#2d4152', cover: '#d8e6f0', player: '#ff7a45', score: 75 },
+    { id: 'night',    name: 'Night Ops', ground: '#0d1512', line: '#17241e', cover: '#4b6b5a', player: '#b6ff6a', score: 150 },
+    { id: 'neon',     name: 'Neon Grid', ground: '#150c26', line: '#2b1652', cover: '#38e8ff', player: '#ff4fd8', price: '$1' },
+  ];
+  let skinsOwned = {}, skin = 'concrete';
+  try { skinsOwned = JSON.parse(localStorage.getItem('coverdash-skins') || '{}'); skin = localStorage.getItem('coverdash-skin') || 'concrete'; } catch (e) {}
+  const skinUnlocked = t => (!t.score && !t.price) || (t.score && best >= t.score) || !!skinsOwned[t.id];
+  function applyTheme(id) {
+    const t = THEMES.find(t => t.id === id && skinUnlocked(t)) || THEMES[0];
+    skin = t.id;
+    Object.assign(C, { ground: t.ground, line: t.line, concrete: t.cover, player: t.player });
+    try { localStorage.setItem('coverdash-skin', skin); } catch (e) {}
+  }
+
+  // ---------- First-run tutorial: each hint shows once, ever ----------
+  const HINTS = {
+    move: 'Tap near the cover ahead to run behind it.',
+    laser: 'Flashing red laser means a shot is coming. Stay behind cover!',
+    side: 'Side attacker! Get out of its line, or hide on the far side of cover.',
+    marked: 'Marked cover drops a power-up when it gets destroyed.',
+    gate: 'Speed gate! A turret shot charges it. Then run through for a 10-cover boost.',
+    pickup: 'Tap the glowing power-up to use it!',
+  };
+  let seenHints = {}, hint = null, slowMo = 0;
+  try { seenHints = JSON.parse(localStorage.getItem('coverdash-hints') || '{}'); } catch (e) {}
+  function showHint(id, slow) {
+    if (seenHints[id] || state !== 'play') return;
+    seenHints[id] = 1;
+    try { localStorage.setItem('coverdash-hints', JSON.stringify(seenHints)); } catch (e) {}
+    hint = { id, text: HINTS[id], t: id === 'move' ? 60 : 4.5 };
+    if (slow) slowMo = 1.1;
+  }
+
+  // ---------- Buttons: drawn each frame, and tapping checks what was drawn last ----------
+  let uiHits = [];
+  function uiBtn(x, y, w, h, label, action, style, sub) {
+    uiHits.push({ x, y, w, h, action });
+    const primary = style === 'primary';
+    ctx.fillStyle = primary ? C.player : 'rgba(238,241,246,0.08)';
+    ctx.fillRect(x, y, w, h);
+    if (!primary) { ctx.strokeStyle = style === 'accent' ? C.player : 'rgba(238,241,246,0.35)'; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1); }
+    ctx.fillStyle = primary ? '#141a24' : C.ink;
+    ctx.textAlign = 'center';
+    ctx.font = `700 ${primary ? 16 : 14}px ${FONT}`;
+    ctx.fillText(label, x + w / 2, y + (sub ? h / 2 - 3 : h / 2 + 5));
+    if (sub) { ctx.font = `600 11px ${FONT}`; ctx.globalAlpha = 0.8; ctx.fillText(sub, x + w / 2, y + h / 2 + 13); ctx.globalAlpha = 1; }
+  }
+  function wrapText(text, x, y, maxW, lineH) {
+    const words = text.split(' '); let line = '';
+    for (const w of words) {
+      const test = line ? line + ' ' + w : w;
+      if (ctx.measureText(test).width > maxW && line) { ctx.fillText(line, x, y); line = w; y += lineH; } else line = test;
+    }
+    ctx.fillText(line, x, y);
+  }
+
+  // A row holds one cover, or two at a fork. Every cover is a convex polygon:
+  // a slab, a circle, or a semicircle or triangle at a random angle. Round shapes
+  // are many-sided polygons, so bullets, pathing and snapping treat them like any other cover.
+  // Fairness: cover gets sturdier as fire rate climbs (+5% hits per 10 points), so hiding still works late in a run.
+  const coverHp = base => Math.round(base * (1 + 0.5 * RATE_STEP * Math.floor((score || 0) / 10)));
+  function makeCover(lane, rowY, shape) {
+    const cx = LANES[lane];
+    let pts, cy;
+    if (shape === 'tri') {
+      cy = rowY - 22; const rot = rand(0, Math.PI * 2), R = 46 * rand(...THICK);
+      pts = [0, 1, 2].map(k => [cx + Math.cos(rot + k * 2.0944) * R, cy + Math.sin(rot + k * 2.0944) * R]);
+    } else if (shape === 'circle') {
+      cy = rowY - 30; const R = 28 * rand(...SIZE), N = 18;
+      pts = Array.from({ length: N }, (_, k) => [cx + Math.cos(k * 2 * Math.PI / N) * R, cy + Math.sin(k * 2 * Math.PI / N) * R]);
+    } else if (shape === 'semi') {
+      // centred on its middle so the random spin keeps it in the lane
+      const R = 36 * rand(...SIZE), rot = rand(0, Math.PI * 2), N = 10, off = 4 * R / (3 * Math.PI);
+      cy = rowY - 28;
+      const ox = cx - Math.cos(rot + Math.PI / 2) * off, oy = cy - Math.sin(rot + Math.PI / 2) * off;
+      pts = Array.from({ length: N + 1 }, (_, k) => { const a = rot + k * Math.PI / N; return [ox + Math.cos(a) * R, oy + Math.sin(a) * R]; });
+    } else {
+      cy = rowY - 35; const w = 42 * rand(...SIZE), h = 9 * rand(...SIZE);
+      pts = [[cx - w, cy - h], [cx + w, cy - h], [cx + w, cy + h], [cx - w, cy + h]];
+    }
+    const hp = coverHp(SHAPE_HP[shape] || FLAT_HP);
+    return { shape, lane, cx, cy, pts, hp, maxHp: hp, hit: 0 };
+  }
+  function makeGate(n, covers, prev) {
+    const used = covers.map(c => c.lane).concat(prev ? prev.covers.map(c => c.lane) : []);
+    const free = [0, 1, 2].filter(l => !used.includes(l));
+    if (!free.length) return null;
+    return { x: LANES[free[Math.floor(Math.random() * free.length)]], y: -n * GAP + 100, used: false, charged: false, chargeT: 0 };
+  }
+  function gateNear(x, y) {
+    for (let r = Math.max(0, score - 1); r <= score + 4 && r < rows.length; r++) {
+      const g = rows[r].gate;
+      if (g && !g.used && Math.abs(x - g.x) < GATE_HALF + BULLET_R && Math.abs(y - g.y) < 9 + BULLET_R) return g;
+    }
+    return null;
+  }
+  function pickShape() {
+    let r = Math.random();
+    for (const [shape, w] of SHAPE_MIX) { if ((r -= w) < 0) return shape; }
+    return 'flat';
+  }
+  function rowAt(i) {
+    while (rows.length <= i) {
+      const n = rows.length, y = -n * GAP, prev = rows[n - 1];
+      let covers;
+      if (n >= nextFork) {
+        covers = [makeCover(0, y, pickShape()), makeCover(2, y, pickShape())];
+        nextFork = n + randInt(4, 7);
+      } else {
+        let lane = 1;
+        if (prev) {
+          const used = prev.covers.map(c => c.lane);
+          const options = [0, 1, 2].filter(l => !used.includes(l));
+          lane = options[Math.floor(Math.random() * options.length)];
+        }
+        covers = [makeCover(lane, y, n >= 3 ? pickShape() : 'flat')];
+      }
+      covers.forEach(c => c.row = n);
+      // Marked cover: drops a power-up when it gets blown apart.
+      // One is guaranteed somewhere in the first 20 covers; after that each cover has a 2.5% chance.
+      const marked = n === firstPowerRow || (n > 0 && n !== firstPowerRow && Math.random() < POWER_CHANCE);
+      const power = marked ? ['jam', 'guard', 'armor'][randInt(0, 2)] : null;
+      if (power) covers[Math.floor(Math.random() * covers.length)].power = power;
+      // Acceleration gate: rare, always facing forward, in a lane clear of the cover around it.
+      let gate = null;
+      if (n >= 6 && covers.length === 1 && Math.random() < GATE_CHANCE) gate = makeGate(n, covers, prev);
+      rows.push({ covers, fork: covers.length > 1, gate });
+    }
+    return rows[i];
+  }
+
+  function inPoly(x, y, pts) {
+    let sign = 0;
+    for (let k = 0; k < pts.length; k++) {
+      const a = pts[k], b = pts[(k + 1) % pts.length];
+      const c = (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
+      if (c !== 0) { if (sign && Math.sign(c) !== sign) return false; sign = Math.sign(c); }
+    }
+    return true;
+  }
+  // Fairness: a bullet that visibly touches cover is stopped by it (its radius counts, not just its center).
+  const coverHits = (c, x, y) => inPoly(x, y, c.pts) || nearestEdge(c, x, y).d < BULLET_R;
+
+  // Closest point on the cover's outline to (x, y), plus the direction pointing away from the cover there.
+  function nearestEdge(c, x, y) {
+    let bestD = Infinity, out = null;
+    for (let k = 0; k < c.pts.length; k++) {
+      const a = c.pts[k], b = c.pts[(k + 1) % c.pts.length];
+      const ex = b[0] - a[0], ey = b[1] - a[1];
+      const t = Math.max(0, Math.min(1, ((x - a[0]) * ex + (y - a[1]) * ey) / (ex * ex + ey * ey)));
+      const qx = a[0] + ex * t, qy = a[1] + ey * t, d = Math.hypot(x - qx, y - qy);
+      if (d < bestD) {
+        let nx = -ey, ny = ex;
+        const mx = (a[0] + b[0]) / 2 - c.cx, my = (a[1] + b[1]) / 2 - c.cy;
+        if (nx * mx + ny * my < 0) { nx = -nx; ny = -ny; }
+        const nl = Math.hypot(nx, ny);
+        bestD = d; out = { qx, qy, nx: nx / nl, ny: ny / nl, d };
+      }
+    }
+    return out;
+  }
+  function coverDist(c, x, y) { return inPoly(x, y, c.pts) ? 0 : nearestEdge(c, x, y).d; }
+
+  // Where you end up when you tap (x, y) next to cover c: pressed against the side you tapped.
+  function landingSpot(c, x, y) {
+    const e = nearestEdge(c, x, y);
+    let dx = e.nx, dy = e.ny;
+    if (!inPoly(x, y, c.pts) && e.d > 0.5) {
+      dx = (x - e.qx) / e.d; dy = (y - e.qy) / e.d;
+    }
+    const px = Math.max(PLAYER_R + 2, Math.min(W - PLAYER_R - 2, e.qx + dx * (PLAYER_R + 3)));
+    return { x: px, y: e.qy + dy * (PLAYER_R + 3) };
+  }
+
+  // ---------- Free movement with pathing around cover ----------
+  const CLEAR = PLAYER_R + 1;   // how close the player's center may pass to cover
+
+  function segDist(ax, ay, bx, by, px, py) {
+    const ex = bx - ax, ey = by - ay, l2 = ex * ex + ey * ey;
+    const t = l2 ? Math.max(0, Math.min(1, ((px - ax) * ex + (py - ay) * ey) / l2)) : 0;
+    return Math.hypot(px - ax - ex * t, py - ay - ey * t);
+  }
+  function segsCross(a, b, c, d) {
+    const o = (p, q, r) => Math.sign((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]));
+    return o(a, b, c) !== o(a, b, d) && o(c, d, a) !== o(c, d, b);
+  }
+  // Does walking from A to B pass through (or scrape) this cover?
+  function pathHits(c, ax, ay, bx, by) {
+    if (inPoly(bx, by, c.pts)) return true;
+    for (let k = 0; k < c.pts.length; k++) {
+      const p = c.pts[k], q = c.pts[(k + 1) % c.pts.length];
+      if (segsCross([ax, ay], [bx, by], p, q)) return true;
+      if (segDist(ax, ay, bx, by, p[0], p[1]) < CLEAR - 0.5) return true;
+      if (segDist(p[0], p[1], q[0], q[1], bx, by) < CLEAR - 0.5) return true;
+    }
+    return false;
+  }
+  const liveCovers = (y0, y1) => rows.flatMap(r => r.covers).filter(c => c.hp > 0 && c.cy > y0 - 90 && c.cy < y1 + 90);
+  function blocked(ax, ay, bx, by, covers) { return covers.some(c => pathHits(c, ax, ay, bx, by)); }
+
+  // Shortest route from the player to (tx, ty): straight if clear, otherwise around cover corners.
+  function findPath(sx, sy, tx, ty) {
+    const covers = liveCovers(Math.min(sy, ty) - 150, Math.max(sy, ty) + 150);
+    if (!blocked(sx, sy, tx, ty, covers)) return [[tx, ty]];
+    const nodes = [[sx, sy]];
+    // Waypoints just outside each corner: out along each neighbouring side, and diagonally.
+    const D = CLEAR * 1.3;
+    const outward = (c, a, b) => {
+      let nx = -(b[1] - a[1]), ny = b[0] - a[0];
+      if (nx * ((a[0] + b[0]) / 2 - c.cx) + ny * ((a[1] + b[1]) / 2 - c.cy) < 0) { nx = -nx; ny = -ny; }
+      const l = Math.hypot(nx, ny); return [nx / l, ny / l];
+    };
+    for (const c of covers) {
+      const L = c.pts.length;
+      for (let k = 0; k < L; k++) {
+        const p = c.pts[k];
+        const n1 = outward(c, c.pts[(k + L - 1) % L], p), n2 = outward(c, p, c.pts[(k + 1) % L]);
+        const bx = n1[0] + n2[0], by = n1[1] + n2[1], bl = Math.hypot(bx, by) || 1;
+        // On round cover the corners are shallow, so one diagonal waypoint is enough.
+        const dirs = n1[0] * n2[0] + n1[1] * n2[1] > 0.9 ? [[bx / bl, by / bl]] : [n1, n2, [bx / bl, by / bl]];
+        for (const n of dirs) {
+          const q = [p[0] + n[0] * D, p[1] + n[1] * D];
+          if (q[0] < PLAYER_R || q[0] > W - PLAYER_R) continue;
+          if (covers.some(o => inPoly(q[0], q[1], o.pts) || nearestEdge(o, q[0], q[1]).d < CLEAR)) continue;
+          nodes.push(q);
+        }
+      }
+    }
+    nodes.push([tx, ty]);
+    const N = nodes.length, dist = new Array(N).fill(Infinity), prev = new Array(N).fill(-1), done = new Array(N).fill(false);
+    dist[0] = 0;
+    for (;;) {
+      let u = -1;
+      for (let k = 0; k < N; k++) if (!done[k] && dist[k] < Infinity && (u < 0 || dist[k] < dist[u])) u = k;
+      if (u < 0 || u === N - 1) break;
+      done[u] = true;
+      for (let v = 1; v < N; v++) {
+        if (done[v]) continue;
+        const w = Math.hypot(nodes[v][0] - nodes[u][0], nodes[v][1] - nodes[u][1]);
+        if (dist[u] + w >= dist[v]) continue;
+        if (blocked(nodes[u][0], nodes[u][1], nodes[v][0], nodes[v][1], covers)) continue;
+        dist[v] = dist[u] + w; prev[v] = u;
+      }
+    }
+    if (dist[N - 1] === Infinity) return null;
+    const path = [];
+    for (let k = N - 1; k > 0; k = prev[k]) path.unshift(nodes[k]);
+    return path;
+  }
+
+  // Where a tap sends you: snapped against cover if you tapped on or right next to it, else exactly where you tapped.
+  function tapTarget(wx, wy) {
+    wx = Math.max(PLAYER_R + 2, Math.min(W - PLAYER_R - 2, wx));
+    wy = Math.max(camY + TURRET_Y + 50, Math.min(camY + H - 20, wy));
+    let snap = null, bestD = SNAP;
+    for (const c of liveCovers(wy - 100, wy + 100)) {
+      const d = coverDist(c, wx, wy);
+      if (d < bestD) { bestD = d; snap = c; }
+    }
+    return snap ? landingSpot(snap, wx, wy) : { x: wx, y: wy };
+  }
+
+  // Position after walking `dist` more pixels along the current path.
+  function posAhead(dist) {
+    let x = player.x, y = player.y;
+    for (const p of player.path) {
+      const l = Math.hypot(p[0] - x, p[1] - y);
+      if (dist <= l) return { x: x + (p[0] - x) / l * dist, y: y + (p[1] - y) / l * dist };
+      dist -= l; x = p[0]; y = p[1];
+    }
+    return { x, y };
+  }
+
+  function reset() {
+    rows = []; nextFork = randInt(4, 5); firstPowerRow = randInt(2, 20);
+    rowAt(7);
+    const c0 = rows[0].covers[0];
+    const p0 = landingSpot(c0, c0.cx, c0.cy + 60);
+    player = { x: p0.x, y: p0.y, path: [], trail: [] };
+    armor = 0;
+    turrets = []; bullets = []; parts = [];
+    flankers = []; flankTimer = rand(5, 7); lastFlankShot = -9; gameT = 0;
+    revived = false; reviveMul = 1; invuln = 0; canRevive = false;
+    adUsed = false; tokensUsed = 0; earnedToken = false; scorePop = 0; bestFlashT = 0; passedBest = false; newSkins = []; hint = null;
+    pickups = []; beams = []; boostEnd = 0; boostBlink = 0; jam = 0; guard = 0; guardCd = 0; drone = 0;
+    camY = player.y - PLAYER_SCREEN_Y;
+    score = 0; shake = 0; flash = 0; newBest = false;
+    syncTurrets();
+    firstRun = !seenHints.move;
+    if (firstRun) for (const t of turrets) t.timer += 2.5;   // a moment to get your bearings on the very first run
+  }
+  function startPlay() { reset(); state = 'play'; showHint('move'); }
+  function toMenu() { state = 'title'; hint = null; }
+
+  function difficulty() { return Math.min(score / 25, 1); }
+
+  // Attack speed = steps every 10 points x a ramp that climbs as you near your high score x revive discount.
+  // The ramp's ceiling grows with ln(attack speed you died at last time), so beating your best keeps getting harder.
+  function stepRate() { return 1 + RATE_STEP * Math.floor(score / 10); }
+  function nearBestRamp() {
+    if (best <= 0) return 1;
+    const c = Math.min(score / best, 1);
+    return 1 + NEAR_BEST * Math.log(1 + bestRate) * c * c * c;
+  }
+  function attackRate() { return stepRate() * nearBestRamp() * reviveMul; }
+  function turretCount() { return score < 3 ? 1 : score < 8 ? 2 : 3; }
+
+  function syncTurrets() {
+    const n = turretCount();
+    if (turrets.length === n) return;
+    const old = turrets;
+    turrets = [];
+    for (let k = 0; k < n; k++) {
+      const home = W * (k + 1) / (n + 1);
+      turrets.push(old[k] ? Object.assign(old[k], { home, sx: home, off: 0, dir: 1 })
+        : { home, sx: home, off: 0, dir: 1, phase: 'idle', timer: rand(0.6, 1.2) + k * 0.4, tx: 0, ty: 0, recoil: 0 });
+    }
+  }
+
+  const maxFlankers = () => Math.min(MAX_FLANKERS, 1 + Math.floor(score / FLANK_EVERY));
+  function spawnFlanker(side) {
+    if (flankers.length >= maxFlankers()) return;
+    side = side || (Math.random() < 0.5 ? -1 : 1);
+    // spread attackers on the same side apart vertically
+    const taken = flankers.filter(f => f.side === side).map(f => f.off);
+    let off = 0;
+    for (const o of [0, -70, 70, -140, 140]) if (!taken.some(t => Math.abs(t - o) < 50)) { off = o; break; }
+    sfx('warn'); showHint('side', true);
+    flankers.push({ side, off, y: player.y + off, slide: 0, phase: 'enter', timer: 0.6, tx: player.x, ty: player.y, recoil: 0 });
+  }
+  // Stagger: only one side attacker locks on at a time, with a gap after each side shot,
+  // and never while a top gun is mid-lock.
+  function flankMayLock() {
+    return gameT - lastFlankShot >= FLANK_GAP && !flankers.some(f => f.phase === 'lock')
+      && !turrets.some(t => t.phase === 'lock' || t.phase === 'burst');
+  }
+  function killFlanker(f) {
+    const fx = flankX(f);
+    burst(fx, f.y, C.enemy, 24, 240);
+    burst(fx, f.y, POWER.guard.color, 10, 160);
+    shake = Math.max(shake, 6);
+    sfx('kill');
+    flankers = flankers.filter(o => o !== f);
+  }
+  const flankX = f => f.side < 0 ? lerp(-24, 16, f.slide) : lerp(W + 24, W - 16, f.slide);
+
+  // Top guns aim at where the player is right now (no leading toward where they tapped).
+  // Accuracy grows with score: 0 = aim at where you are now, 1 = fully lead your movement.
+  // Full lead never goes past where you're running to, so reaching cover still saves you.
+  const GATE_COLOR = '#4fd8ff';
+  const boosting = () => boostEnd > 0;
+  function accuracy() { return Math.max(0, Math.min(1, (score - LEAD_START) / (LEAD_FULL - LEAD_START))); }
+  // Each gun guesses differently (full lead, partial lead, light lead) so zig-zagging in the open
+  // can't fool all of them at once. Cover still blocks every one of them.
+  const LEAD_MIX = [1, 0.4, 0.75];
+  function aimPoint(ox, oy, speed, gun) {
+    const L = accuracy() * LEAD_MIX[(gun || 0) % LEAD_MIX.length];
+    if (!player.path.length || L <= 0) return { x: player.x, y: player.y };
+    const ahead = posAhead(Math.hypot(player.x - ox, player.y - oy) / speed * MOVE_SPEED);
+    return { x: lerp(player.x, ahead.x, L), y: lerp(player.y, ahead.y, L) };
+  }
+
+  // (wx, wy) is the tapped point in world space. You can change direction at any time.
+  function dash(wx, wy) {
+    audioInit();
+    const sy0 = wy - camY;
+    const btn = uiHits.find(b => inBtn(b, wx, sy0));
+    if (btn) {
+      if (state === 'over' && performance.now() - overAt < 450) return;   // avoid accidental taps right after dying
+      sfx('click'); btn.action(); return;
+    }
+    if (state === 'store') { const b = STORE_BTNS.find(b => inBtn(b, wx, sy0)); if (b) { sfx('click'); buy(b.id); } return; }
+    if (state !== 'play') return;
+    for (let k = 0; k < 3; k++) { const sl = SLOT(k); if (Math.hypot(wx - sl.x, sy0 - sl.y) < sl.r + 6) { useStock(INV_KEYS[k]); return; } }
+    // Tapping a dropped power-up uses it
+    for (const p of pickups) {
+      if (Math.hypot(p.x - wx, p.y - wy) < 36) { activate(p); return; }
+    }
+    const to = tapTarget(wx, wy);
+    if (Math.hypot(to.x - player.x, to.y - player.y) < 4) return;
+    const path = findPath(player.x, player.y, to.x, to.y);
+    if (!path) return;
+    if (!player.path.length) { burst(player.x, player.y + 8, '#6d7686', 6, 60); sfx('run'); }
+    player.path = path;
+  }
+
+  // Keyboard: Up = run behind the next cover ahead, Down = back one cover, Left/Right = sidestep.
+  function keyDash(dir, side) {
+    if (state !== 'play') return;
+    if (side) return dash(player.x + side * 70, player.y);
+    const ahead = liveCovers(player.y - 400, player.y + 400)
+      .filter(c => dir > 0 ? c.cy < player.y - 40 : c.cy > player.y + 20)
+      .sort((a, b) => Math.abs(a.cy - player.y) - Math.abs(b.cy - player.y))[0];
+    if (ahead) dash(ahead.cx, ahead.cy + 60);
+  }
+
+  // ---------- Stocked power-ups (bought in the store, kept between runs) ----------
+  const INV_KEYS = ['jam', 'guard', 'armor'];
+  let inv = { jam: 0, guard: 0, armor: 0 };
+  try { inv = Object.assign(inv, JSON.parse(localStorage.getItem('coverdash-inv') || '{}')); } catch (e) {}
+  const saveInv = () => { try { localStorage.setItem('coverdash-inv', JSON.stringify(inv)); } catch (e) {} };
+  const SLOT = k => ({ x: 26 + k * 38, y: H - 72, r: 16 });
+
+  function useStock(type) {
+    if (state !== 'play' || inv[type] <= 0) return;
+    if (type === 'armor' && armor >= ARMOR_MAX) return;   // don't waste one when already full
+    inv[type] -= 1; saveInv();
+    activate({ type, x: player.x, y: player.y });
+  }
+
+  // Test-mode store: buttons are laid out once and shared by drawing and tapping
+  const STORE_BTNS = [
+    { id: 'pack', x: 32, y: 162, w: W - 64, h: 62, price: '$2' },
+    { id: 'jam', x: 32, y: 250, w: W - 64, h: 40, price: '$1' },
+    { id: 'guard', x: 32, y: 296, w: W - 64, h: 40, price: '$1' },
+    { id: 'armor', x: 32, y: 342, w: W - 64, h: 40, price: '$1' },
+    { id: 'tokens', x: 32, y: 394, w: W - 64, h: 44, price: '$1' },
+    { id: 'adtoken', x: 32, y: 444, w: W - 64, h: 44, price: 'AD' },
+    { id: 'noads', x: 32, y: 494, w: W - 64, h: 44, price: '$5' },
+    { id: 'back', x: 110, y: 592, w: W - 220, h: 36 },
+  ];
+  const BTN_STORE = { x: W / 2 - 70, y: 596, w: 140, h: 34 };
+  let toast = '', toastT = 0, noAds = false;
+  try { noAds = localStorage.getItem('coverdash-noads') === '1'; } catch (e) {}
+  function buy(id) {
+    if (id === 'back') { toMenu(); return; }
+    if (id === 'noads') {
+      if (noAds) { toast = 'Ads already removed'; toastT = 2; return; }
+      noAds = true; try { localStorage.setItem('coverdash-noads', '1'); } catch (e) {}
+      toast = 'Ads removed'; toastT = 2; return;
+    }
+    if (id === 'tokens') { tokens += 4; saveTokens(); toast = 'Added 4 continue tokens'; toastT = 2; return; }
+    if (id === 'adtoken') {
+      if (adTokensLeft() <= 0) { toast = 'No more free tokens today'; toastT = 2; return; }
+      if (noAds) {   // Remove Ads owners claim their 3 daily tokens without watching anything
+        if (adTokenDay !== today()) { adTokenDay = today(); adTokensToday = 0; }
+        adTokensToday += 1; tokens += 1; saveTokens();
+        toast = 'Got 1 continue token'; toastT = 2; return;
+      }
+      adPurpose = 'token'; state = 'ad'; adLeft = AD_SECONDS; return;
+    }
+    if (id === 'pack') { for (const k of INV_KEYS) inv[k] += 5; toast = 'Added 5 of each power-up'; }
+    else { inv[id] += 5; toast = `Added 5 ${POWER[id].label}`; }
+    saveInv(); toastT = 2;
+  }
+
+  function activate(p) {
+    p.used = true;
+    burst(p.x, p.y, POWER[p.type].color, 24, 220);
+    sfx('power'); vibrate(25);
+    if (p.type === 'jam') {
+      jam = JAM_TIME;
+      for (const t of turrets) { t.phase = 'idle'; t.timer = 0.5; }
+      bullets = bullets.filter(b => b.friendly || b.side);   // shots already in the air from the top fizzle out
+    } else if (p.type === 'guard') {
+      guard = GUARD_TIME; guardCd = 0.2;
+    } else {
+      armor = Math.min(ARMOR_MAX, armor + 1);
+    }
+  }
+
+  // size > 4 makes chunky debris that lingers longer
+  function burst(x, y, color, n, sp, size) {
+    const big = (size || 3.5) > 4;
+    for (let k = 0; k < n; k++) {
+      const a = rand(0, Math.PI * 2), v = rand(sp * 0.3, sp), life = big ? rand(0.5, 0.9) : rand(0.3, 0.6);
+      parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life, max: life, color, r: rand(1.5, size || 3.5) });
+    }
+  }
+
+  function hitPlayer() {
+    state = 'dying';
+    shake = 14; flash = 1; slowMo = 0.5;
+    sfx('hurt'); vibrate([60, 40, 140]);
+    burst(player.x, player.y, C.player, 26, 260);
+    burst(player.x, player.y, C.enemy, 10, 180);
+    deathRate = stepRate() * nearBestRamp();   // saved without the revive discount, so ads never make later runs easier
+    setTimeout(() => {
+      state = 'over';
+      overAt = performance.now();
+      canRevive = (!adUsed && (noAds || adReady())) || (tokens > 0 && tokensUsed < TOKENS_PER_RUN);
+      if (!canRevive) endRun();
+    }, 700);
+  }
+
+  // The run is really over: record the high score and the attack speed it was set at.
+  function endRun() {
+    canRevive = false;
+    runsPlayed += 1;
+    if (runsPlayed % RUNS_PER_TOKEN === 0) { tokens += 1; earnedToken = true; }
+    saveTokens();
+    overAt = performance.now();
+    if (score > best) {
+      newSkins = THEMES.filter(t => t.score && best < t.score && score >= t.score).map(t => t.name);
+      best = score; bestRate = deathRate; newBest = true;
+      sfx('best');
+      try { localStorage.setItem('coverdash-best', best); localStorage.setItem('coverdash-best-rate', bestRate.toFixed(3)); } catch (e) {}
+    }
+  }
+
+  // Simulated ad finished: back in, same spot, short shield, slower attacks. One revive per run.
+  function revive() {
+    revived = true; reviveMul = REVIVE_CUT;
+    sfx('revive');
+    state = 'play'; invuln = 2;
+    bullets = []; flankers = []; flankTimer = rand(5, 7);
+    player.path = [];
+    for (const t of turrets) { t.phase = 'idle'; t.timer = rand(1.2, 2); }
+    flash = 0;
+  }
+
+  const BTN_AD = { x: 44, y: 352, w: W - 88, h: 46 }, BTN_END = { x: 44, y: 410, w: W - 88, h: 38 };
+  const inBtn = (b, x, y) => x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h;
+
+  function fire(ox, oy, tx, ty, speed, extra) {
+    const dx = tx - ox, dy = ty - oy, len = Math.hypot(dx, dy) || 1;
+    sfx(extra && extra.friendly ? 'drone' : 'shot');
+    bullets.push(Object.assign({ x: ox + dx / len * 16, y: oy + dy / len * 16, vx: dx / len * speed, vy: dy / len * speed }, extra));
+  }
+
+  // ---------- Update ----------
+  function update(dt) {
+    toastT = Math.max(0, toastT - dt);
+    if (hint) { hint.t -= dt; if (hint.t <= 0 || (hint.id === 'move' && score >= 1)) hint = null; }
+    scorePop = Math.max(0, (scorePop || 0) - dt * 4);
+    bestFlashT = Math.max(0, (bestFlashT || 0) - dt);
+    // brief slow motion when a tutorial hint pops up, or when you're hit
+    if (slowMo > 0) { slowMo -= dt; dt *= 0.4; }
+    if (state === 'ad') {
+      adLeft -= dt;
+      if (adLeft <= 0) {
+        if (adPurpose === 'token') {
+          if (adTokenDay !== today()) { adTokenDay = today(); adTokensToday = 0; }
+          adTokensToday += 1; tokens += 1; saveTokens();
+          state = 'store'; toast = 'Got 1 continue token'; toastT = 2;
+        } else revive();
+      }
+      return;
+    }
+    if (state === 'play' || state === 'dying') {
+      const d = difficulty();
+
+      if (state === 'play' && player.path.length) {
+        let step = MOVE_SPEED * (boosting() ? BOOST_SPEED : 1) * dt;
+        const py0 = player.y;
+        while (step > 0 && player.path.length) {
+          const p = player.path[0], l = Math.hypot(p[0] - player.x, p[1] - player.y);
+          if (l <= step) { player.x = p[0]; player.y = p[1]; player.path.shift(); step -= l; }
+          else { player.x += (p[0] - player.x) / l * step; player.y += (p[1] - player.y) / l * step; step = 0; }
+        }
+        player.trail.push([player.x, player.y]);
+        if (player.trail.length > (boosting() ? 14 : 8)) player.trail.shift();
+        // Running through a gate's opening (either direction) starts the boost.
+        for (const r of [score - 1, score, score + 1, score + 2]) {
+          const g = rows[r] && rows[r].gate;
+          if (g && !g.used && g.charged && Math.min(py0, player.y) <= g.y && Math.max(py0, player.y) >= g.y && Math.abs(player.x - g.x) < GATE_HALF) {
+            g.used = true; boostEnd = score + BOOST_POINTS; boostBlink = 0;
+            sfx('gate'); vibrate(30); flash = Math.max(flash, 0.25);
+            burst(g.x, g.y, GATE_COLOR, 26, 260);
+          }
+        }
+        // Score is the furthest row of cover you've reached.
+        const reached = Math.max(0, Math.floor((-player.y + 30) / GAP));
+        if (reached > score) {
+          score = reached;
+          scorePop = 1;
+          if (best > 0 && !passedBest && score > best) { passedBest = true; bestFlashT = 2; sfx('best'); }
+          rowAt(score + 7);
+          syncTurrets();
+          // Boost over: blink a few times (still safe), then you can be hit again.
+          if (boostEnd && score >= boostEnd) { boostEnd = 0; boostBlink = BOOST_BLINKS * BLINK_TIME; sfx('unboost'); }
+          for (let r = score + 1; r <= score + 4; r++) if (rows[r].gate && !rows[r].gate.used) showHint('gate');
+          // A fork is next: send a side attacker so the choice matters.
+          if (score >= FLANK_START && rows[score + 1].fork) spawnFlanker();
+        }
+      } else if (player.trail.length) player.trail.shift();
+      rowAt(Math.floor((-camY) / GAP) + 3);
+      // Fairness: the next row of cover always exists. If it gets shot away before you reach it, fresh cover drops in.
+      for (const r of [score + 1, score + 2]) {
+        const row = rowAt(r);
+        if (row.covers.every(c => c.hp <= 0)) {
+          row.covers = row.covers.map(c => Object.assign(makeCover(c.lane, -r * GAP, c.shape), { row: r }));
+          for (const c of row.covers) burst(c.cx, c.cy, C.concrete, 14, 120);
+        }
+      }
+
+      // Top turrets: idle -> aim (thin laser) -> lock (flashing laser) -> fire
+      const speed = BULLET_SPEED + BULLET_SPEED_GAIN * d + LEAD_BULLET_GAIN * accuracy(), A = attackRate();
+      for (const t of turrets) {
+        const ox = t.sx, oy = camY + TURRET_Y + 14;
+        t.recoil = Math.max(0, t.recoil - dt * 6);
+        // Drift: +1% move speed for every +10% fire rate
+        if (score >= DRIFT_START && jam <= 0) {
+          const v = DRIFT_SPEED * (1 + 0.01 * Math.max(0, (A - 1) / 0.1));
+          t.off += t.dir * v * dt;
+          if (Math.abs(t.off) > DRIFT_RANGE) { t.off = Math.sign(t.off) * DRIFT_RANGE; t.dir *= -1; }
+          t.sx = t.home + t.off;
+        }
+        if (jam > 0) { t.phase = 'idle'; t.timer = Math.max(t.timer, 0.5); continue; }
+        t.timer -= dt;
+        if (state === 'play') { const a = aimPoint(ox, oy, speed, turrets.indexOf(t)); t.tx = a.x; t.ty = a.y; }
+        if (t.timer > 0) continue;
+        if (t.phase === 'idle') {
+          // Plan one attack so this gun averages one shot every BASE_PERIOD / A seconds.
+          // The warning (aim + lock) can't shrink forever, so at high rates the gun fires a quick burst instead.
+          const aim = Math.max(MIN_AIM, 0.8 / Math.sqrt(A)), lock = Math.max(MIN_LOCK, 0.36 / Math.pow(A, 0.25));
+          const P = BASE_PERIOD / A, warn = aim + lock;
+          const k = P >= warn + 0.2 ? 1 : Math.ceil((warn + 0.2) / P);
+          t.phase = 'aim'; t.timer = aim; t.lockT = lock; t.k = k;
+          t.rest = Math.max(0.15, k * P - warn - (k - 1) * BURST_GAP);
+        }
+        else if (t.phase === 'aim') {
+          if (flankers.some(f => f.phase === 'lock' && f.timer < 0.2)) { t.timer = 0.1; continue; }   // let the side shot go first
+          t.phase = 'lock'; t.timer = t.lockT;
+          if (state === 'play') { sfx('lock'); if (score >= 1) showHint('laser', true); }
+        }
+        else {
+          if (state === 'play') { fire(ox, oy, t.tx, t.ty, speed); t.recoil = 1; }
+          t.k -= 1;
+          if (t.k > 0) { t.phase = 'burst'; t.timer = BURST_GAP; }
+          else { t.phase = 'idle'; t.timer = t.rest * rand(0.75, 1.25); }
+        }
+      }
+
+      // Side attackers: slide in, track you, flash, fire once, leave. More are allowed as score climbs;
+      // their speed never changes, and their shots are staggered (see flankMayLock).
+      gameT += dt;
+      if (state === 'play' && score >= FLANK_START && flankers.length < maxFlankers()) {
+        flankTimer -= dt;
+        if (flankTimer <= 0) { spawnFlanker(); flankTimer = rand(3, 6) / Math.sqrt(maxFlankers()); }
+      }
+      for (const f of flankers.slice()) {
+        f.recoil = Math.max(0, f.recoil - dt * 6);
+        f.y = lerp(f.y, player.y + f.off, Math.min(1, dt * 2.2));
+        if (state === 'play' && f.phase !== 'leave') { f.tx = player.x; f.ty = player.y; }
+        f.timer -= dt;
+        if (f.phase === 'enter') { f.slide = Math.min(1, f.slide + dt / 0.6); if (f.timer <= 0) { f.phase = 'aim'; f.timer = 1.0; } }
+        else if (f.phase === 'aim' && f.timer <= 0 && flankMayLock()) { f.phase = 'lock'; f.timer = 0.42; }
+        else if (f.phase === 'lock' && f.timer <= 0) {
+          if (state === 'play') { fire(flankX(f), f.y, f.tx, f.ty, SIDE_BULLET_SPEED, { side: true }); f.recoil = 1; lastFlankShot = gameT; }
+          f.phase = 'leave'; f.timer = 0.4;
+        } else if (f.phase === 'leave') {
+          f.slide = Math.max(0, f.slide - dt / 0.5);
+          if (f.slide <= 0) flankers = flankers.filter(o => o !== f);
+        }
+      }
+
+      // Power-up timers, the guard drone, and dropped power-ups
+      jam = Math.max(0, jam - dt);
+      invuln = Math.max(0, invuln - dt);
+      if (state === 'play') boostBlink = Math.max(0, boostBlink - dt);
+      for (let r = Math.max(0, score - 1); r < Math.min(rows.length, score + 6); r++) if (rows[r].gate) rows[r].gate.chargeT = Math.max(0, rows[r].gate.chargeT - dt);
+      guard = Math.max(0, guard - dt);
+      drone += dt * 4;
+      const prey = flankers.filter(f => f.phase !== 'leave' && f.slide > 0.4)
+        .sort((a, b) => (a.phase === 'lock' ? -1 : 0) - (b.phase === 'lock' ? -1 : 0))[0];   // shoot the one about to fire first
+      if (guard > 0 && state === 'play' && prey) {
+        guardCd -= dt;
+        if (guardCd <= 0) {
+          // Hitscan laser: hits instantly and never misses
+          const dx = player.x + Math.cos(drone) * 20, dy = player.y + Math.sin(drone) * 20;
+          beams.push({ x1: dx, y1: dy, x2: flankX(prey), y2: prey.y, t: 0.22 });
+          sfx('zap'); killFlanker(prey);
+          guardCd = 0.3;
+        }
+      }
+      for (const bm of beams) bm.t -= dt;
+      beams = beams.filter(bm => bm.t > 0);
+      for (const p of pickups) p.life -= dt;
+      pickups = pickups.filter(p => p.life > 0 && !p.used);
+
+      // Bullets (moved in small steps so they can't skip through thin cover)
+      for (const b of bullets) {
+        const steps = Math.ceil(Math.hypot(b.vx, b.vy) * dt / 6);
+        for (let k = 0; k < steps && !b.dead; k++) {
+          b.x += b.vx * dt / steps; b.y += b.vy * dt / steps;
+          if (b.friendly) {
+            const hit = flankers.find(f => Math.hypot(b.x - flankX(f), b.y - f.y) < 16);
+            if (hit) { b.dead = true; killFlanker(hit); }
+            continue;
+          }
+          // A turret shot that flies into a gate is soaked up. The first one charges it; after that the
+          // field keeps soaking turret shots, so waiting behind a gate for it to charge isn't a death trap.
+          if (!b.side) {
+            const g = gateNear(b.x, b.y);
+            if (g) {
+              b.dead = true;
+              if (!g.charged) { g.charged = true; g.chargeT = 0.6; sfx('charge'); burst(g.x, g.y, GATE_COLOR, 22, 220); }
+              else { sfx('block'); burst(b.x, b.y, GATE_COLOR, 8, 140); }
+              break;
+            }
+          }
+          for (const row of rows) {
+            for (const s of row.covers) {
+              if (s.hp <= 0 || Math.abs(s.cy - b.y) > 70 || !coverHits(s, b.x, b.y)) continue;
+              b.dead = true;
+              s.hp -= 1; s.hit = 1;
+              if (s.hp > 0) sfx('coverHit');
+              burst(b.x, b.y, s.hp > 0 ? '#c9d0db' : C.concrete, s.hp > 0 ? 7 : 22, s.hp > 0 ? 120 : 220);
+              if (s.hp <= 0) {
+                shake = Math.max(shake, 5);
+                burst(s.cx, s.cy, C.concrete, 12, 200, 7);   // chunky debris
+                sfx('coverBreak'); vibrate(20);
+                if (s.power) { pickups.push({ type: s.power, x: s.cx, y: s.cy, life: PICKUP_LIFE }); showHint('pickup', true); }
+              }
+              break;
+            }
+            if (b.dead) break;
+          }
+          if (!b.dead && state === 'play' && invuln <= 0 && !boosting() && boostBlink <= 0 && Math.hypot(b.x - player.x, b.y - player.y) < HIT_R + BULLET_R + (armor ? 4 : 0)) {
+            b.dead = true;
+            if (armor > 0) {
+              armor -= 1; shake = Math.max(shake, 6);
+              sfx('block'); vibrate(40);
+              burst(b.x, b.y, POWER.armor.color, 20, 200);
+            } else hitPlayer();
+          }
+        }
+        const sy = b.y - camY;
+        if (sy > H + 40 || sy < -40 || b.x < -40 || b.x > W + 40) b.dead = true;
+      }
+      bullets = bullets.filter(b => !b.dead);
+      for (const row of rows) for (const s of row.covers) s.hit = Math.max(0, s.hit - dt * 5);
+    }
+
+    for (const p of parts) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.92; p.vy *= 0.92; p.life -= dt; }
+    parts = parts.filter(p => p.life > 0);
+
+    if (player) camY = lerp(camY, player.y - PLAYER_SCREEN_Y, Math.min(1, dt * 7));
+    shake = Math.max(0, shake - dt * 40);
+    flash = Math.max(0, flash - dt * 2.5);
+  }
+
+  // ---------- Draw ----------
+  function laser(ox, oy, tx, ty, phase, now) {
+    const dx = tx - ox, dy = ty - oy, len = Math.hypot(dx, dy) || 1;
+    if (phase === 'aim') { ctx.strokeStyle = 'rgba(255,90,79,0.28)'; ctx.lineWidth = 1; }
+    else { ctx.strokeStyle = (Math.floor(now / 70) % 2) ? 'rgba(255,90,79,0.95)' : 'rgba(255,170,160,0.95)'; ctx.lineWidth = 2.5; }
+    ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox + dx / len * 900, oy + dy / len * 900); ctx.stroke();
+  }
+
+  function polyPath(pts, ox, oy) {
+    ctx.beginPath();
+    pts.forEach((p, k) => k ? ctx.lineTo(p[0] + ox, p[1] + oy) : ctx.moveTo(p[0] + ox, p[1] + oy));
+    ctx.closePath();
+  }
+  function drawCover(c) {
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    polyPath(c.pts, 3, 5); ctx.fill();
+    ctx.fillStyle = c.hit > 0 ? '#e6ebf2' : C.concrete;
+    polyPath(c.pts, 0, 0); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 1.5;
+    polyPath(c.pts, 0, 0); ctx.stroke();
+    // cracks from the middle toward the corners as damage builds
+    const full = c.maxHp || SHAPE_HP[c.shape] || FLAT_HP;
+    const lost = Math.ceil((1 - c.hp / full) * Math.min(full, c.pts.length) - 1e-6);
+    const stride = Math.max(1, Math.floor(c.pts.length / Math.min(full, c.pts.length)));
+    ctx.strokeStyle = 'rgba(30,36,48,0.8)'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let k = 0; k < lost && k < c.pts.length; k++) {
+      const p = c.pts[(k * stride) % c.pts.length];
+      ctx.moveTo(c.cx, c.cy);
+      ctx.lineTo(lerp(c.cx, p[0], 0.45) + 4, lerp(c.cy, p[1], 0.45) - 2);
+      ctx.lineTo(lerp(c.cx, p[0], 0.8), lerp(c.cy, p[1], 0.8));
+    }
+    ctx.stroke();
+    if (c.power) {
+      const col = POWER[c.power].color;
+      ctx.fillStyle = '#141a24';
+      ctx.beginPath(); ctx.arc(c.cx, c.cy, 9, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = col; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(c.cx, c.cy, 9, 0, Math.PI * 2); ctx.stroke();
+      powerGlyph(c.power, c.cx, c.cy, 5, col);
+    }
+  }
+
+  // Jam = a lightning bolt, Guard = a crosshair
+  function powerGlyph(type, x, y, s, col) {
+    ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 2;
+    ctx.beginPath();
+    if (type === 'jam') {
+      ctx.moveTo(x + s * 0.3, y - s); ctx.lineTo(x - s * 0.5, y + s * 0.1); ctx.lineTo(x + s * 0.2, y + s * 0.1); ctx.lineTo(x - s * 0.3, y + s);
+      ctx.stroke();
+    } else if (type === 'armor') {
+      ctx.moveTo(x - s * 0.8, y - s * 0.7); ctx.lineTo(x + s * 0.8, y - s * 0.7); ctx.lineTo(x + s * 0.7, y + s * 0.1);
+      ctx.lineTo(x, y + s); ctx.lineTo(x - s * 0.7, y + s * 0.1); ctx.closePath();
+      ctx.stroke();
+    } else {
+      ctx.arc(x, y, s * 0.6, 0, Math.PI * 2);
+      ctx.moveTo(x - s, y); ctx.lineTo(x + s, y); ctx.moveTo(x, y - s); ctx.lineTo(x, y + s);
+      ctx.stroke();
+    }
+  }
+
+  function draw(now) {
+    uiHits = [];
+    ctx.save();
+    if (shake > 0) ctx.translate(rand(-shake, shake) * 0.5, rand(-shake, shake) * 0.5);
+
+    // Ground with scrolling grid
+    ctx.fillStyle = C.ground;
+    ctx.fillRect(-20, -20, W + 40, H + 40);
+    const cy = camY || 0;
+    ctx.strokeStyle = C.line; ctx.lineWidth = 1;
+    const off = ((-cy % 50) + 50) % 50;
+    ctx.beginPath();
+    for (let y = off; y < H; y += 50) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+    for (let x = 30; x < W; x += 50) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+    ctx.stroke();
+
+    if (state === 'title') { drawTitle(now); ctx.restore(); return; }
+    if (state === 'store') { drawStore(); ctx.restore(); return; }
+    if (state === 'skins') { drawSkins(); ctx.restore(); return; }
+    if (state === 'settings') { drawSettings(); ctx.restore(); return; }
+
+    ctx.save();
+    ctx.translate(0, -camY);
+
+    // Cover
+    for (const row of rows) for (const s of row.covers) {
+      if (s.hp <= 0 || s.cy - camY > H + 80 || s.cy - camY < -60) continue;
+      drawCover(s);
+    }
+    // Acceleration gates: two metal pylons with an energy field between them, always facing forward.
+    // Uncharged: dark and dashed. Charged (a turret shot hit it): bright, glowing, arrows racing forward.
+    for (const row of rows) {
+      const g = row.gate;
+      if (!g || g.y - camY > H + 40 || g.y - camY < -40) continue;
+      const sh = 0.5 + 0.5 * Math.sin(now / 120), on = g.charged && !g.used;
+      ctx.globalAlpha = g.used ? 0.3 : 1;
+      if (on) {
+        ctx.save(); ctx.shadowColor = GATE_COLOR; ctx.shadowBlur = 18 + 8 * sh;
+        ctx.fillStyle = `rgba(79,216,255,${0.28 + 0.15 * sh})`;
+        ctx.fillRect(g.x - GATE_HALF, g.y - 9, GATE_HALF * 2, 18);
+        ctx.restore();
+        ctx.strokeStyle = '#eafcff'; ctx.lineWidth = 2.5;
+        for (let k = 0; k < 3; k++) {
+          const cy = g.y + 7 - k * 7 - ((now / 45) % 7);
+          ctx.beginPath(); ctx.moveTo(g.x - 10, cy + 4); ctx.lineTo(g.x, cy - 3); ctx.lineTo(g.x + 10, cy + 4); ctx.stroke();
+        }
+      } else if (!g.used) {
+        ctx.strokeStyle = 'rgba(79,216,255,0.45)'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
+        ctx.strokeRect(g.x - GATE_HALF, g.y - 9, GATE_HALF * 2, 18); ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(79,216,255,0.7)'; ctx.font = `700 9px ${FONT}`; ctx.textAlign = 'center';
+        ctx.fillText('NEEDS A SHOT', g.x, g.y + 27);
+      }
+      for (const sx of [-1, 1]) {   // pylons
+        const px = g.x + sx * (GATE_HALF + 4);
+        ctx.fillStyle = '#2b3442'; ctx.fillRect(px - 5, g.y - 15, 10, 30);
+        ctx.strokeStyle = GATE_COLOR; ctx.lineWidth = 1.5; ctx.strokeRect(px - 5, g.y - 15, 10, 30);
+        ctx.fillStyle = on ? '#eafcff' : 'rgba(79,216,255,' + (0.25 + 0.2 * sh) + ')';
+        ctx.beginPath(); ctx.arc(px, g.y - 15, 4, 0, Math.PI * 2); ctx.fill();
+      }
+      if (g.chargeT > 0) {   // flash ring when it gets charged
+        ctx.strokeStyle = GATE_COLOR; ctx.lineWidth = 3; ctx.globalAlpha = g.chargeT / 0.6;
+        ctx.beginPath(); ctx.arc(g.x, g.y, GATE_HALF + 30 * (1 - g.chargeT / 0.6), 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+    // Next cover to score: soft glow around it, and a glowing line you must cross to bank the point
+    if (state === 'play' || state === 'paused') {
+      const n = score + 1, lineY = -n * GAP + 30, pulse = 0.5 + 0.5 * Math.sin(now / 220);
+      const g = ctx.createLinearGradient(0, lineY - 26, 0, lineY + 4);
+      g.addColorStop(0, 'rgba(242,193,78,0)'); g.addColorStop(1, `rgba(242,193,78,${0.10 + 0.08 * pulse})`);
+      ctx.fillStyle = g; ctx.fillRect(0, lineY - 26, W, 30);
+      ctx.strokeStyle = `rgba(242,193,78,${0.35 + 0.3 * pulse})`; ctx.lineWidth = 2; ctx.setLineDash([10, 8]);
+      ctx.beginPath(); ctx.moveTo(0, lineY); ctx.lineTo(W, lineY); ctx.stroke(); ctx.setLineDash([]);
+      ctx.save(); ctx.shadowColor = C.player; ctx.shadowBlur = 14 + 8 * pulse;
+      ctx.strokeStyle = `rgba(242,193,78,${0.5 + 0.3 * pulse})`; ctx.lineWidth = 2;
+      for (const c of rowAt(n).covers) if (c.hp > 0) { polyPath(c.pts, 0, 0); ctx.stroke(); }
+      ctx.restore();
+      ctx.fillStyle = `rgba(242,193,78,${0.55 + 0.3 * pulse})`; ctx.font = `700 10px ${FONT}`; ctx.textAlign = 'right';
+      ctx.fillText('+1', W - 8, lineY - 6);
+    }
+
+    // Route you're running and where it ends
+    if (state === 'play' && player.path.length) {
+      ctx.strokeStyle = 'rgba(242,193,78,0.45)'; ctx.lineWidth = 2; ctx.setLineDash([3, 6]);
+      ctx.beginPath(); ctx.moveTo(player.x, player.y);
+      for (const p of player.path) ctx.lineTo(p[0], p[1]);
+      ctx.stroke(); ctx.setLineDash([]);
+      const end = player.path[player.path.length - 1];
+      ctx.beginPath(); ctx.arc(end[0], end[1], PLAYER_R + 4, 0, Math.PI * 2); ctx.stroke();
+    }
+
+    // Player
+    const blinkOff = boostBlink > 0 && (boostBlink % BLINK_TIME) < BLINK_TIME / 2;
+    if (state !== 'over' && state !== 'dying' && state !== 'ad' && !(invuln > 0 && Math.floor(now / 90) % 2)) {
+      if (boosting() || boostBlink > 0) {   // boost shield: solid while boosted, blinks 3 times before it ends
+        ctx.globalAlpha = blinkOff ? 0.12 : 0.55 + 0.2 * Math.sin(now / 80);
+        ctx.strokeStyle = GATE_COLOR; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(player.x, player.y, PLAYER_R + 7, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = 'rgba(79,216,255,0.15)'; ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      if (player.trail.length > 1) {
+        ctx.strokeStyle = boosting() ? 'rgba(79,216,255,0.4)' : 'rgba(242,193,78,0.3)'; ctx.lineWidth = PLAYER_R; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        ctx.beginPath(); player.trail.forEach((p, k) => k ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.stroke();
+        ctx.lineCap = 'butt';
+      }
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.beginPath(); ctx.ellipse(player.x + 2, player.y + 9, PLAYER_R, 5, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = C.player;
+      ctx.beginPath(); ctx.arc(player.x, player.y, PLAYER_R, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#7a5a12';
+      ctx.beginPath(); ctx.arc(player.x, player.y - 3, 4, 0, Math.PI * 2); ctx.fill();
+      // one ring per armor stack
+      ctx.strokeStyle = POWER.armor.color; ctx.lineWidth = 2.5;
+      for (let k = 0; k < armor; k++) { ctx.beginPath(); ctx.arc(player.x, player.y, PLAYER_R + 4 + k * 5, 0, Math.PI * 2); ctx.stroke(); }
+    }
+
+    // Guard laser beams
+    for (const bm of beams) {
+      const k = bm.t / 0.22;
+      ctx.save(); ctx.shadowColor = POWER.guard.color; ctx.shadowBlur = 12;
+      ctx.strokeStyle = `rgba(110,231,160,${k})`; ctx.lineWidth = 2 + 4 * k;
+      ctx.beginPath(); ctx.moveTo(bm.x1, bm.y1); ctx.lineTo(bm.x2, bm.y2); ctx.stroke();
+      ctx.strokeStyle = `rgba(230,255,240,${k})`; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(bm.x1, bm.y1); ctx.lineTo(bm.x2, bm.y2); ctx.stroke();
+      ctx.restore();
+    }
+    // Guard drone
+    if (guard > 0 && state === 'play') {
+      const dx = player.x + Math.cos(drone) * 20, dy = player.y + Math.sin(drone) * 20;
+      ctx.fillStyle = POWER.guard.color;
+      ctx.beginPath(); ctx.arc(dx, dy, 4.5, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Dropped power-ups
+    for (const p of pickups) {
+      if (p.life < 2.5 && Math.floor(now / 100) % 2) continue;   // blink before fading
+      const col = POWER[p.type].color, pulse = 0.5 + 0.5 * Math.sin(now / 140);
+      ctx.globalAlpha = 0.25 + 0.2 * pulse;
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 22 + pulse * 4, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#141a24';
+      ctx.beginPath(); ctx.arc(p.x, p.y, 15, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = col; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 15, 0, Math.PI * 2); ctx.stroke();
+      powerGlyph(p.type, p.x, p.y, 8, col);
+      ctx.fillStyle = col; ctx.textAlign = 'center';
+      ctx.font = `700 11px ${FONT}`;
+      ctx.fillText('TAP · ' + POWER[p.type].label, p.x, p.y - 26);
+    }
+
+    // Lasers
+    if (state === 'play') {
+      for (const t of turrets) if (t.phase !== 'idle') laser(t.sx, camY + TURRET_Y + 14, t.tx, t.ty, t.phase, now);
+      for (const f of flankers) if (f.phase === 'aim' || f.phase === 'lock') laser(flankX(f), f.y, f.tx, f.ty, f.phase, now);
+    }
+
+    // Side attacker
+    for (const f of flankers) {
+      const fx = flankX(f);
+      const ang = Math.atan2(f.ty - f.y, f.tx - fx);
+      ctx.save(); ctx.translate(fx, f.y);
+      ctx.save(); ctx.rotate(ang);
+      ctx.fillStyle = '#5a1f1c'; ctx.fillRect(4 - f.recoil * 5, -4, 20, 8);
+      if (f.recoil > 0.5) { ctx.fillStyle = `rgba(255,214,122,${f.recoil})`; ctx.beginPath(); ctx.arc(26 - f.recoil * 5, 0, 7 * f.recoil, 0, Math.PI * 2); ctx.fill(); }
+      ctx.restore();
+      ctx.fillStyle = f.phase === 'lock' ? '#ff8a80' : C.enemy;
+      ctx.beginPath(); ctx.moveTo(0, -14); ctx.lineTo(12, 0); ctx.lineTo(0, 14); ctx.lineTo(-12, 0); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#141a24';
+      ctx.beginPath(); ctx.arc(0, 0, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+
+    // Bullets
+    for (const b of bullets) {
+      const len = Math.hypot(b.vx, b.vy);
+      ctx.strokeStyle = b.friendly ? 'rgba(110,231,160,0.5)' : 'rgba(255,90,79,0.45)'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(b.x, b.y); ctx.lineTo(b.x - b.vx / len * 18, b.y - b.vy / len * 18); ctx.stroke();
+      ctx.fillStyle = b.friendly ? '#d4ffe4' : '#ffd2cc';
+      ctx.beginPath(); ctx.arc(b.x, b.y, BULLET_R, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Particles
+    for (const p of parts) {
+      ctx.globalAlpha = Math.max(0, p.life / p.max);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - p.r / 2, p.y - p.r / 2, p.r, p.r);
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // Side attack warning
+    for (const f of flankers) {
+      if (f.phase !== 'enter' || state !== 'play' || !(Math.floor(now / 120) % 2)) continue;
+      const wx = f.side < 0 ? 22 : W - 22, wy = Math.max(TURRET_Y + 50, Math.min(H - 140, f.y - camY));
+      ctx.fillStyle = C.enemy;
+      ctx.font = `700 30px ${FONT}`; ctx.textAlign = 'center';
+      ctx.fillText('!', wx, wy - 22);
+    }
+
+    // Enemy line (fixed at top of screen)
+    ctx.fillStyle = '#141a24';
+    ctx.fillRect(0, 0, W, TURRET_Y + 26);
+    ctx.fillStyle = 'rgba(255,90,79,0.5)';
+    for (let x = -20; x < W; x += 24) { ctx.beginPath(); ctx.moveTo(x, TURRET_Y + 22); ctx.lineTo(x + 12, TURRET_Y + 22); ctx.lineTo(x + 18, TURRET_Y + 26); ctx.lineTo(x + 6, TURRET_Y + 26); ctx.fill(); }
+    for (const t of turrets) {
+      const ox = t.sx, oy = TURRET_Y;
+      const ang = Math.atan2(t.ty - (camY + oy + 14), t.tx - ox);
+      ctx.save(); ctx.translate(ox, oy + 6);
+      ctx.save(); ctx.rotate(ang);
+      ctx.fillStyle = '#5a1f1c';
+      ctx.fillRect(4 - t.recoil * 5, -4, 20, 8);
+      if (t.recoil > 0.5) { ctx.fillStyle = `rgba(255,214,122,${t.recoil})`; ctx.beginPath(); ctx.arc(26 - t.recoil * 5, 0, 7 * t.recoil, 0, Math.PI * 2); ctx.fill(); }
+      ctx.restore();
+      ctx.fillStyle = jam > 0 ? '#4a5568' : t.phase === 'lock' ? '#ff8a80' : C.enemy;
+      ctx.beginPath(); ctx.arc(0, 0, 13, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#141a24';
+      ctx.beginPath(); ctx.arc(0, 0, 5, 0, Math.PI * 2); ctx.fill();
+      if (jam > 0 && Math.floor(now / 90 + t.sx) % 3 === 0) {
+        ctx.strokeStyle = POWER.jam.color; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(-14, -6); ctx.lineTo(-4, 2); ctx.lineTo(2, -4); ctx.lineTo(14, 6); ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // HUD (on a soft band so it reads over cover blocks)
+    const g = ctx.createLinearGradient(0, H - 120, 0, H);
+    g.addColorStop(0, 'rgba(20,26,36,0)');
+    g.addColorStop(0.5, 'rgba(20,26,36,0.85)');
+    g.addColorStop(1, 'rgba(20,26,36,0.95)');
+    ctx.fillStyle = g; ctx.fillRect(0, H - 120, W, 120);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = C.ink;
+    ctx.font = `700 ${Math.round(44 * (1 + 0.25 * scorePop))}px ${FONT}`;
+    ctx.fillText(score, W / 2, H - 52);
+    if (bestFlashT > 0) { ctx.fillStyle = C.player; ctx.font = `700 16px ${FONT}`; ctx.globalAlpha = Math.min(1, bestFlashT); ctx.fillText('NEW BEST!', W / 2, H - 100); ctx.globalAlpha = 1; }
+    ctx.font = `600 13px ${FONT}`;
+    ctx.fillStyle = 'rgba(238,241,246,0.55)';
+    ctx.fillText(`COVER REACHED  ·  BEST ${best}`, W / 2, H - 28);
+    if (SHOW_ATTACK) {
+      ctx.textAlign = 'right'; ctx.font = `600 11px ${FONT}`; ctx.fillStyle = 'rgba(255,90,79,0.75)';
+      ctx.fillText(`ATTACK x${attackRate().toFixed(2)}`, W - 12, H - 12);
+    }
+    drawInventory();
+    ctx.textAlign = 'center';
+    // Active power-ups, shown just under the turret row
+    let hy = TURRET_Y + 44;
+    for (const [type, left, total] of [['jam', jam, JAM_TIME], ['guard', guard, GUARD_TIME]]) {
+      if (left <= 0 || state !== 'play') continue;
+      const col = POWER[type].color;
+      ctx.fillStyle = 'rgba(20,26,36,0.8)'; ctx.fillRect(W / 2 - 90, hy - 12, 180, 22);
+      ctx.fillStyle = col; ctx.globalAlpha = 0.35; ctx.fillRect(W / 2 - 90, hy - 12, 180 * left / total, 22); ctx.globalAlpha = 1;
+      ctx.fillStyle = col; ctx.font = `700 12px ${FONT}`; ctx.textAlign = 'center';
+      ctx.fillText(`${POWER[type].hud}  ${Math.ceil(left)}s`, W / 2, hy + 3);
+      hy += 26;
+    }
+
+    if ((boosting() || boostBlink > 0) && state === 'play') {
+      ctx.fillStyle = 'rgba(20,26,36,0.8)'; ctx.fillRect(W / 2 - 90, hy - 12, 180, 22);
+      ctx.fillStyle = GATE_COLOR; ctx.font = `700 12px ${FONT}`; ctx.textAlign = 'center';
+      ctx.fillText(boosting() ? `BOOST  ${boostEnd - score} cover left` : 'BOOST ENDING', W / 2, hy + 3);
+      hy += 26;
+    }
+    if (armor > 0 && state === 'play') {
+      ctx.fillStyle = POWER.armor.color; ctx.font = `700 12px ${FONT}`; ctx.textAlign = 'center';
+      ctx.fillText(`ARMOR ${'■ '.repeat(armor)}${'□ '.repeat(ARMOR_MAX - armor)}`.trim(), W / 2, hy + 3);
+    }
+
+    if (state === 'play') {
+      // pause button
+      uiBtn(W - 48, H - 62, 36, 36, '', () => { state = 'paused'; }, 'ghost');
+      ctx.fillStyle = C.ink; ctx.fillRect(W - 36, H - 53, 4, 18); ctx.fillRect(W - 28, H - 53, 4, 18);
+      if (hint) drawHint();
+      // let players spot marked cover the first time it's on screen
+      if (!seenHints.marked && rows.some(r => r.covers.some(c => c.power && c.hp > 0 && c.cy - camY > 120 && c.cy - camY < H - 140))) showHint('marked', true);
+    }
+    if (state === 'paused') drawPause();
+    if (state === 'over') drawOver(now);
+    if (state === 'ad') drawAd();
+    if (state === 'share') drawShare();
+
+    if (flash > 0) { ctx.fillStyle = `rgba(255,90,79,${flash * 0.35})`; ctx.fillRect(-20, -20, W + 40, H + 40); }
+    ctx.restore();
+  }
+
+  function panel(y, h) {
+    ctx.fillStyle = 'rgba(16,21,29,0.86)';
+    ctx.fillRect(24, y, W - 48, h);
+    ctx.strokeStyle = 'rgba(242,193,78,0.5)'; ctx.lineWidth = 1.5;
+    ctx.strokeRect(24.5, y + 0.5, W - 49, h - 1);
+  }
+
+  function drawTitle(now) {
+    // Demo scene: a tilted wedge, the player tucked against the side facing away from a side attacker
+    const demo = { shape: 'tri', cx: 230, cy: 320, hp: 4, hit: 0, pts: [[268, 282], [262, 366], [184, 306]] };
+    drawCover(demo);
+    ctx.fillStyle = C.player; ctx.beginPath(); ctx.arc(208, 350, PLAYER_R, 0, Math.PI * 2); ctx.fill();
+    const a = 0.5 + 0.5 * Math.sin(now / 160);
+    ctx.strokeStyle = `rgba(255,90,79,${0.35 + 0.5 * a})`; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(338, 326); ctx.lineTo(266, 326); ctx.stroke();
+    ctx.fillStyle = C.enemy; ctx.beginPath(); ctx.moveTo(350, 312); ctx.lineTo(362, 326); ctx.lineTo(350, 340); ctx.lineTo(338, 326); ctx.fill();
+    drawCover({ shape: 'flat', cx: 96, cy: 310, hp: 3, hit: 0, pts: [[54, 301], [138, 301], [138, 319], [54, 319]] });
+
+    ctx.textAlign = 'center';
+    ctx.fillStyle = C.player;
+    ctx.font = `700 56px ${FONT}`;
+    ctx.fillText('COVER', W / 2, 150);
+    ctx.fillText('DASH', W / 2, 200);
+    if (best > 0) { ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 13px ${FONT}`; ctx.fillText(`BEST ${best}`, W / 2, 230); }
+    uiBtn(80, 410, 200, 52, 'PLAY', startPlay, 'primary');
+    uiBtn(80, 474, 200, 40, 'SKINS', () => { state = 'skins'; }, 'ghost');
+    uiBtn(80, 522, 200, 40, 'STORE', () => { state = 'store'; }, 'ghost');
+    uiBtn(80, 570, 200, 40, 'SETTINGS', () => { state = 'settings'; }, 'ghost');
+  }
+
+  function drawHint() {
+    ctx.font = `600 14px ${FONT}`;
+    const y = 150;
+    ctx.fillStyle = 'rgba(16,21,29,0.9)'; ctx.fillRect(28, y - 22, W - 56, 58);
+    ctx.strokeStyle = C.player; ctx.lineWidth = 1.5; ctx.strokeRect(28.5, y - 21.5, W - 57, 57);
+    ctx.fillStyle = C.ink; ctx.textAlign = 'center';
+    const oneLine = ctx.measureText(hint.text).width <= W - 84;
+    wrapText(hint.text, W / 2, oneLine ? y + 12 : y + 2, W - 84, 19);
+  }
+
+  function drawPause() {
+    ctx.fillStyle = 'rgba(10,14,20,0.75)'; ctx.fillRect(-20, -20, W + 40, H + 40);
+    ctx.textAlign = 'center'; ctx.fillStyle = C.player; ctx.font = `700 40px ${FONT}`;
+    ctx.fillText('PAUSED', W / 2, 220);
+    uiBtn(80, 270, 200, 50, 'RESUME', () => { state = 'play'; }, 'primary');
+    uiBtn(80, 332, 200, 40, 'RESTART', startPlay, 'ghost');
+    uiBtn(80, 384, 200, 40, 'MAIN MENU', toMenu, 'ghost');
+    uiBtn(80, 450, 96, 36, settings.sfx ? 'SOUND ON' : 'SOUND OFF', () => { settings.sfx = !settings.sfx; saveSettings(); }, 'ghost');
+    uiBtn(184, 450, 96, 36, settings.music ? 'MUSIC ON' : 'MUSIC OFF', () => { settings.music = !settings.music; saveSettings(); }, 'ghost');
+  }
+
+  function drawSettings() {
+    ctx.textAlign = 'center'; ctx.fillStyle = C.player; ctx.font = `700 34px ${FONT}`;
+    ctx.fillText('SETTINGS', W / 2, 120);
+    const rowsDef = [['sfx', 'Sound effects'], ['music', 'Music'], ['vibe', 'Vibration']];
+    rowsDef.forEach(([k, label], i) => {
+      const y = 170 + i * 58;
+      ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.font = `600 16px ${FONT}`;
+      ctx.fillText(label, 40, y + 25);
+      uiBtn(W - 130, y, 90, 38, settings[k] ? 'ON' : 'OFF', () => { settings[k] = !settings[k]; saveSettings(); if (k === 'vibe' && settings.vibe) vibrate(30); }, settings[k] ? 'primary' : 'ghost');
+    });
+    ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(238,241,246,0.55)'; ctx.font = `600 11px ${FONT}`;
+    ctx.fillText('Vibration works in the phone app. Most browsers ignore it.', W / 2, 362);
+    uiBtn(60, 390, W - 120, 40, 'REPLAY TUTORIAL', () => { seenHints = {}; try { localStorage.removeItem('coverdash-hints'); } catch (e) {} toast = 'Tutorial will show on your next run'; toastT = 2; }, 'ghost');
+    if (toastT > 0) { ctx.fillStyle = C.player; ctx.font = `700 13px ${FONT}`; ctx.textAlign = 'center'; ctx.fillText(toast, W / 2, 456); }
+    uiBtn(100, 570, W - 200, 40, 'BACK', toMenu, 'ghost');
+  }
+
+  function drawSkins() {
+    ctx.textAlign = 'center'; ctx.fillStyle = C.player; ctx.font = `700 34px ${FONT}`;
+    ctx.fillText('SKINS', W / 2, 96);
+    ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 12px ${FONT}`;
+    ctx.fillText('Reach a score to unlock, or buy in test mode', W / 2, 118);
+    THEMES.forEach((t, i) => {
+      const x = 28, y = 136 + i * 80, w = W - 56, h = 70, open = skinUnlocked(t), on = skin === t.id;
+      uiHits.push({ x, y, w, h, action: () => {
+        if (open) { applyTheme(t.id); return; }
+        if (t.price) { skinsOwned[t.id] = 1; try { localStorage.setItem('coverdash-skins', JSON.stringify(skinsOwned)); } catch (e) {} applyTheme(t.id); toast = `Bought ${t.name} (simulated)`; toastT = 2; }
+      } });
+      ctx.fillStyle = on ? 'rgba(238,241,246,0.12)' : 'rgba(238,241,246,0.05)'; ctx.fillRect(x, y, w, h);
+      ctx.strokeStyle = on ? C.player : 'rgba(238,241,246,0.25)'; ctx.lineWidth = on ? 2 : 1; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+      // little preview of the skin
+      ctx.fillStyle = t.ground; ctx.fillRect(x + 8, y + 8, 84, 54);
+      ctx.strokeStyle = t.line; ctx.lineWidth = 1; ctx.beginPath();
+      for (let gx = x + 18; gx < x + 92; gx += 18) { ctx.moveTo(gx, y + 8); ctx.lineTo(gx, y + 62); }
+      ctx.stroke();
+      ctx.fillStyle = t.cover; ctx.fillRect(x + 22, y + 22, 56, 10);
+      ctx.fillStyle = t.player; ctx.beginPath(); ctx.arc(x + 50, y + 44, 8, 0, Math.PI * 2); ctx.fill();
+      if (!open) { ctx.fillStyle = 'rgba(10,14,20,0.55)'; ctx.fillRect(x + 8, y + 8, 84, 54); }
+      ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.font = `700 16px ${FONT}`;
+      ctx.fillText(t.name, x + 106, y + 30);
+      ctx.font = `600 12px ${FONT}`; ctx.fillStyle = on ? C.player : 'rgba(238,241,246,0.6)';
+      const status = on ? 'EQUIPPED' : open ? 'Tap to equip' : t.price ? `${t.price} · tap to buy (test mode)` : `Reach ${t.score} to unlock`;
+      ctx.fillText(status, x + 106, y + 50);
+    });
+    if (toastT > 0) { ctx.fillStyle = C.player; ctx.font = `700 13px ${FONT}`; ctx.textAlign = 'center'; ctx.fillText(toast, W / 2, 552); }
+    uiBtn(100, 570, W - 200, 40, 'BACK', toMenu, 'ghost');
+  }
+
+  function drawInventory() {
+    if (state !== 'play' || !INV_KEYS.some(k => inv[k] > 0)) return;
+    INV_KEYS.forEach((k, i) => {
+      const sl = SLOT(i), col = POWER[k].color, has = inv[k] > 0;
+      ctx.globalAlpha = has ? 1 : 0.3;
+      ctx.fillStyle = '#141a24'; ctx.beginPath(); ctx.arc(sl.x, sl.y, sl.r, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(sl.x, sl.y, sl.r, 0, Math.PI * 2); ctx.stroke();
+      powerGlyph(k, sl.x, sl.y, 7, col);
+      ctx.fillStyle = col; ctx.font = `700 11px ${FONT}`; ctx.textAlign = 'center';
+      ctx.fillText(inv[k], sl.x, sl.y - sl.r - 5);
+      ctx.globalAlpha = 1;
+    });
+  }
+
+  function drawStore() {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = C.player; ctx.font = `700 34px ${FONT}`; ctx.fillText('STORE', W / 2, 110);
+    ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 12px ${FONT}`;
+    ctx.fillText('TEST MODE · NO REAL PAYMENTS OR ADS', W / 2, 134);
+    ctx.fillText('All optional. Every power-up also drops free in-game.', W / 2, 150);
+    for (const b of STORE_BTNS) {
+      const back = b.id === 'back';
+      ctx.fillStyle = 'rgba(238,241,246,0.07)'; ctx.fillRect(b.x, b.y, b.w, b.h);
+      ctx.strokeStyle = back ? 'rgba(238,241,246,0.35)' : 'rgba(242,193,78,0.45)'; ctx.lineWidth = 1;
+      ctx.strokeRect(b.x + 0.5, b.y + 0.5, b.w - 1, b.h - 1);
+      if (back) { ctx.fillStyle = C.ink; ctx.font = `700 14px ${FONT}`; ctx.textAlign = 'center'; ctx.fillText('BACK', W / 2, b.y + 23); continue; }
+      // price tag
+      ctx.fillStyle = C.player; ctx.fillRect(b.x + b.w - 58, b.y + b.h / 2 - 15, 46, 30);
+      ctx.fillStyle = '#141a24'; ctx.font = `700 16px ${FONT}`; ctx.textAlign = 'center';
+      ctx.fillText(b.id === 'adtoken' && noAds ? 'FREE' : b.price, b.x + b.w - 35, b.y + b.h / 2 + 6);
+      ctx.textAlign = 'left';
+      if (b.id === 'pack') {
+        INV_KEYS.forEach((k, i) => powerGlyph(k, b.x + 22 + i * 22, b.y + 24, 7, POWER[k].color));
+        ctx.fillStyle = C.ink; ctx.font = `700 15px ${FONT}`; ctx.fillText('POWER PACK', b.x + 14, b.y + 48);
+        ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 12px ${FONT}`; ctx.fillText('5 of each power-up', b.x + 90, b.y + 28);
+      } else if (b.id === 'tokens' || b.id === 'adtoken') {
+        drawToken(b.x + 24, b.y + b.h / 2, 11);
+        ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.font = `700 15px ${FONT}`;
+        ctx.fillText(b.id === 'tokens' ? '4 CONTINUE TOKENS' : 'FREE CONTINUE TOKEN', b.x + 46, b.y + 19);
+        ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 11px ${FONT}`;
+        ctx.fillText(b.id === 'tokens' ? `Revive after a shot · you have ${tokens}` : `${noAds ? 'Free, no ad' : 'Watch an ad'} · ${adTokensLeft()} of ${AD_TOKENS_PER_DAY} left today`, b.x + 46, b.y + 34);
+      } else if (b.id === 'noads') {
+        ctx.fillStyle = C.ink; ctx.font = `700 15px ${FONT}`; ctx.fillText(noAds ? 'ADS REMOVED ✓' : 'REMOVE ADS', b.x + 14, b.y + 19);
+        ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 11px ${FONT}`; ctx.fillText('One-time · revive and daily tokens skip ads', b.x + 14, b.y + 34);
+      } else {
+        powerGlyph(b.id, b.x + 24, b.y + b.h / 2, 8, POWER[b.id].color);
+        ctx.fillStyle = C.ink; ctx.font = `700 14px ${FONT}`; ctx.fillText(`5 × ${POWER[b.id].label}  (single-use)`, b.x + 46, b.y + 17);
+        ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 11px ${FONT}`; ctx.fillText(POWER[b.id].desc, b.x + 46, b.y + 32);
+      }
+    }
+    ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 12px ${FONT}`;
+    ctx.fillText('OR PICK ONE', 32, 243);
+    ctx.textAlign = 'center'; ctx.font = `600 12px ${FONT}`;
+    if (toastT > 0) { ctx.fillStyle = C.player; ctx.font = `700 13px ${FONT}`; ctx.fillText(toast + ' (simulated)', W / 2, 568); }
+    else { ctx.fillStyle = C.ink; ctx.fillText(`You have: ${INV_KEYS.map(k => `${POWER[k].label} ${inv[k]}`).join(' · ')} · TOKENS ${tokens}`, W / 2, 568); }
+  }
+
+  function button(b, text, primary, sub) {
+    ctx.fillStyle = primary ? C.player : 'rgba(238,241,246,0.08)';
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    if (!primary) { ctx.strokeStyle = 'rgba(238,241,246,0.35)'; ctx.lineWidth = 1; ctx.strokeRect(b.x + 0.5, b.y + 0.5, b.w - 1, b.h - 1); }
+    ctx.fillStyle = primary ? '#141a24' : C.ink;
+    ctx.textAlign = 'center';
+    ctx.font = `700 ${primary ? 16 : 14}px ${FONT}`;
+    ctx.fillText(text, W / 2, b.y + (sub ? 20 : b.h / 2 + 5));
+    if (sub) { ctx.font = `600 11px ${FONT}`; ctx.fillText(sub, W / 2, b.y + 36); }
+  }
+
+  // A continue token, drawn like an arcade coin
+  function drawToken(x, y, r) {
+    ctx.fillStyle = '#e8b84a'; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#8a6418'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, r * 0.7, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = '#8a6418'; ctx.font = `700 ${Math.round(r * 1.1)}px ${FONT}`; ctx.textAlign = 'center'; ctx.fillText('C', x, y + r * 0.4);
+  }
+
+  // Sharing is optional and never rewarded (platform rules forbid rewarding shares).
+  // Simulated here; the real app opens the phone's share sheet with this text and a store link.
+  const shareText = () => `I just reached ${score} points on Cover Dash! Can you beat it?`;
+
+  function drawOver(now) {
+    ctx.textAlign = 'center';
+    if (canRevive) {
+      panel(160, 320);
+      ctx.fillStyle = C.enemy; ctx.font = `700 34px ${FONT}`; ctx.fillText('SHOT DOWN', W / 2, 206);
+      ctx.fillStyle = C.ink; ctx.font = `700 56px ${FONT}`; ctx.fillText(score, W / 2, 266);
+      ctx.font = `600 14px ${FONT}`; ctx.fillStyle = 'rgba(238,241,246,0.6)';
+      ctx.fillText(score > best ? 'NEW BEST SO FAR' : `BEST ${best}`, W / 2, 292);
+      let y = 310;
+      if (!adUsed && (noAds || adReady())) {
+        uiBtn(44, y, W - 88, 48, noAds ? 'CONTINUE' : 'WATCH AD TO CONTINUE', () => {
+          adUsed = true;
+          if (noAds) revive(); else { adPurpose = 'revive'; state = 'ad'; adLeft = AD_SECONDS; }
+        }, 'primary', 'Pick up where you left off');
+        y += 58;
+      }
+      if (tokens > 0 && tokensUsed < TOKENS_PER_RUN) {
+        uiBtn(44, y, W - 88, 48, 'USE A CONTINUE TOKEN', () => { tokens -= 1; tokensUsed += 1; saveTokens(); revive(); }, 'accent',
+          `You have ${tokens} · ${TOKENS_PER_RUN - tokensUsed} more allowed this run`);
+        drawToken(66, y + 24, 11);
+        y += 58;
+      }
+      uiBtn(44, Math.max(y, 420), W - 88, 40, 'END RUN', endRun, 'ghost');
+      return;
+    }
+    panel(170, 300);
+    ctx.fillStyle = C.enemy; ctx.font = `700 34px ${FONT}`; ctx.fillText('SHOT DOWN', W / 2, 216);
+    ctx.fillStyle = C.ink; ctx.font = `700 56px ${FONT}`; ctx.fillText(score, W / 2, 278);
+    ctx.font = `600 14px ${FONT}`;
+    ctx.fillStyle = newBest ? C.player : 'rgba(238,241,246,0.6)';
+    ctx.fillText(newBest ? 'NEW BEST!' : `BEST ${best}`, W / 2, 304);
+    ctx.font = `700 12px ${FONT}`; ctx.fillStyle = C.player;
+    const notes = [];
+    if (newSkins.length) notes.push(`SKIN UNLOCKED: ${newSkins.join(', ').toUpperCase()}`);
+    if (earnedToken) notes.push(`+1 CONTINUE TOKEN FOR ${RUNS_PER_TOKEN} RUNS PLAYED`);
+    else notes.push(`${RUNS_PER_TOKEN - runsPlayed % RUNS_PER_TOKEN} MORE RUNS TO A FREE TOKEN`);
+    notes.forEach((n, i) => { ctx.globalAlpha = n.startsWith('+') || n.startsWith('SKIN') ? 1 : 0.6; ctx.fillText(n, W / 2, 326 + i * 16); });
+    ctx.globalAlpha = 1;
+    uiBtn(60, 362, W - 120, 46, 'PLAY AGAIN', startPlay, 'primary');
+    uiBtn(60, 416, (W - 128) / 2, 36, 'MENU', toMenu, 'ghost');
+    uiBtn(68 + (W - 128) / 2, 416, (W - 128) / 2, 36, 'SHARE', () => { state = 'share'; }, 'ghost');
+  }
+
+  function drawShare() {
+    ctx.fillStyle = 'rgba(10,14,20,0.85)'; ctx.fillRect(-20, -20, W + 40, H + 40);
+    ctx.fillStyle = '#f4f6fa'; ctx.fillRect(32, 170, W - 64, 230);
+    ctx.fillStyle = '#141a24'; ctx.textAlign = 'left'; ctx.font = `700 16px ${FONT}`;
+    ctx.fillText('Share your score', 48, 200);
+    ctx.font = `600 11px ${FONT}`; ctx.fillStyle = '#5b6575'; ctx.fillText('TEST MODE · NOTHING IS POSTED', 48, 218);
+    ctx.fillStyle = '#e3e7ee'; ctx.fillRect(48, 232, W - 96, 92);
+    ctx.fillStyle = '#141a24'; ctx.font = `600 15px ${FONT}`;
+    wrapText(shareText(), 60, 258, W - 120, 20);
+    uiBtn(48, 340, (W - 104) / 2, 42, '', () => { state = 'over'; }, 'ghost');
+    ctx.fillStyle = '#141a24'; ctx.font = `700 14px ${FONT}`; ctx.textAlign = 'center'; ctx.fillText('CANCEL', 48 + (W - 104) / 4, 366);
+    uiBtn(56 + (W - 104) / 2, 340, (W - 104) / 2, 42, 'SHARE', () => { state = 'over'; toast = 'Shared'; toastT = 1.5; }, 'primary');
+  }
+
+  // Stand-in for a real rewarded ad
+  function drawAd() {
+    ctx.fillStyle = '#0b0f15'; ctx.fillRect(-20, -20, W + 40, H + 40);
+    ctx.strokeStyle = 'rgba(238,241,246,0.25)'; ctx.setLineDash([6, 6]); ctx.lineWidth = 1.5;
+    ctx.strokeRect(40, 170, W - 80, 260); ctx.setLineDash([]);
+    ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(238,241,246,0.7)';
+    ctx.font = `700 22px ${FONT}`; ctx.fillText('AD PLACEHOLDER', W / 2, 290);
+    ctx.font = `600 13px ${FONT}`; ctx.fillText('A real rewarded ad will play here', W / 2, 316);
+    ctx.fillStyle = C.player; ctx.font = `700 16px ${FONT}`;
+    ctx.fillText(adPurpose === 'token' ? `Your token arrives in ${Math.ceil(adLeft)}…` : `Back in the fight in ${Math.ceil(adLeft)}…`, W / 2, 470);
+  }
+
+  // ---------- Input ----------
+  cvs.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    const r = cvs.getBoundingClientRect();
+    dash((e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H + camY);
+  });
+  addEventListener('keydown', e => {
+    audioInit();
+    if (e.code === 'Escape' || e.code === 'KeyP') { if (state === 'play') state = 'paused'; else if (state === 'paused') state = 'play'; return; }
+    if ((e.code === 'Enter' || e.code === 'Space') && (state === 'title' || (state === 'over' && !canRevive))) { e.preventDefault(); startPlay(); return; }
+    const map = { ArrowUp: [1, 0], Space: [1, 0], Enter: [1, 0], ArrowLeft: [1, -1], ArrowRight: [1, 1], ArrowDown: [-1, 0] };
+    if (e.code in map) { e.preventDefault(); keyDash(...map[e.code]); }
+    const digit = { Digit1: 'jam', Digit2: 'guard', Digit3: 'armor' }[e.code];
+    if (digit) useStock(digit);
+  });
+
+  // Pause automatically when the app goes to the background
+  document.addEventListener('visibilitychange', () => { if (document.hidden && state === 'play') state = 'paused'; });
+
+  // ---------- Loop ----------
+  applyTheme(skin);
+  reset();
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    update(dt);
+    draw(now);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+  window.__game = { get tokens() { return tokens; }, get runs() { return runsPlayed; }, get state() { return state; }, get hint() { return hint; }, get skin() { return skin; }, get score() { return score; }, get flankers() { return flankers; }, get camY() { return camY; }, get pickups() { return pickups; }, get jam() { return jam; }, get guard() { return guard; }, get flankerAlive() { return flankers.length > 0; }, get player() { return player; }, get armor() { return armor; }, get rate() { return attackRate(); }, get inv() { return inv; }, get turrets() { return turrets; }, get best() { return [best, bestRate]; }, covers() { return liveCovers(camY, camY + H).map(c => ({ cx: c.cx, cy: c.cy, pts: c.pts, shape: c.shape, hp: c.hp })); }, path: findPath, gates() { return rows.map(r => r.gate).filter(Boolean); }, get boost() { return [boostEnd, boostBlink]; }, forceGate() { const r = score + 1, row = rowAt(r), lane = [0, 1, 2].find(l => !row.covers.some(c => c.lane === l) && !rowAt(score).covers.some(c => c.lane === l)); if (lane === undefined) return null; row.gate = { x: LANES[lane], y: -r * GAP + 100, used: false, charged: false, chargeT: 0 }; return row.gate; } };
+})();
+</script>
+</body></html>
