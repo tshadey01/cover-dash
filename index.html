@@ -551,16 +551,21 @@
     ctx.fill();
   }
   // ---------- XP, levels and coins ----------
-  // Each finished run: 10 XP + 1 per point, and 1 coin per 5 points. Level-ups give 50 coins and a stocked power-up.
+  // Each finished run: XP from runXP (soft curve, no cap) and 1 coin per 5 points. Level-ups give 50 coins and a stocked power-up.
   // Coins buy coin-only skins.
   const XP_BASE = 10, COIN_EVERY = 5, LEVEL_COINS = 50;
-  const xpNeed = lv => 100 + 25 * (lv - 1);
+  // Level n needs 40, 55, 70, 85, 100 ... XP, growing a little faster later (level 10: 190, level 20: 390).
+  // New players level every 2-3 runs; later levels take roughly 5-10 runs.
+  const xpNeed = lv => 5 * Math.round((40 + 12 * (lv - 1) + 1.5 * Math.pow(lv - 1, 1.5)) / 5);
+  // Run XP: 10 + 1 per point up to 50, then 1/2 per point up to 200, then 1/4 per point with no cap,
+  // so long runs always earn more without letting experts out-level everyone tenfold.
+  const runXP = sc => Math.round(XP_BASE + Math.min(sc, 50) + 0.5 * Math.max(0, Math.min(sc, 200) - 50) + 0.25 * Math.max(0, sc - 200));
   let prog = { xp: 0, level: 1, coins: 0 };
   try { prog = Object.assign(prog, JSON.parse(localStorage.getItem('coverdash-prog') || '{}')); } catch (e) {}
   const saveProg = () => { try { localStorage.setItem('coverdash-prog', JSON.stringify(prog)); } catch (e) {} };
   let runGain = null;   // what the last run earned, for the game-over screen
   function awardRun() {
-    const xp = XP_BASE + score, coins = Math.floor(score / COIN_EVERY), ups = [];
+    const xp = runXP(score), coins = Math.floor(score / COIN_EVERY), ups = [];
     prog.xp += xp; prog.coins += coins;
     while (prog.xp >= xpNeed(prog.level)) {
       prog.xp -= xpNeed(prog.level); prog.level += 1; prog.coins += LEVEL_COINS;
