@@ -198,23 +198,80 @@
   // Vibration: works in the Android app; browsers and iOS mostly ignore it (iOS needs the app's haptics plugin).
   function vibrate(p) { if (settings.vibe) try { navigator.vibrate && navigator.vibrate(p); } catch (e) {} }
 
-  // Music: a short looping groove, scheduled a moment ahead so it stays in time
-  const STEP = 60 / 112 / 4;
-  const BASS = [45, 0, 45, 0, 48, 0, 45, 0, 43, 0, 43, 0, 40, 0, 43, 0];
+  // Music: an EDM track synthesized live (126 BPM, A minor: Am F C G), scheduled a moment ahead so it stays in time.
+  // It builds with your run: menus get a filtered groove; in a run the kick, bass and claps come in,
+  // then pumping supersaw chords at 5 points, then an arpeggio lead at 20. Every 16 bars: riser, snare roll, drop.
+  const BPM = 126, STEP = 60 / BPM / 4;
   const midi = n => 440 * Math.pow(2, (n - 69) / 12);
+  const PROG = [[57, 60, 64], [53, 57, 60], [55, 60, 64], [55, 59, 62]];   // Am F C G
+  const ROOT = [45, 41, 48, 43];
   let nextStep = 0, stepIdx = 0;
+  function voice(freqs, when, dur, opt) {   // detuned saws through a lowpass filter, with attack for the pumping feel
+    const f = ac.createBiquadFilter(), g = ac.createGain();
+    f.type = 'lowpass'; f.frequency.value = opt.cutoff; f.Q.value = opt.q || 0.8;
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.linearRampToValueAtTime(opt.vol, when + (opt.attack || 0.005));
+    g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+    f.connect(g); g.connect(musicBus);
+    for (const fr of freqs) for (const det of (opt.detune || [0])) {
+      const o = ac.createOscillator(); o.type = opt.type || 'sawtooth';
+      o.frequency.value = fr; o.detune.value = det;
+      o.connect(f); o.start(when); o.stop(when + dur + 0.05);
+    }
+  }
+  function kick(when, vol) {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = 'sine'; o.frequency.setValueAtTime(160, when); o.frequency.exponentialRampToValueAtTime(42, when + 0.12);
+    g.gain.setValueAtTime(vol, when); g.gain.exponentialRampToValueAtTime(0.0001, when + 0.32);
+    o.connect(g); g.connect(musicBus); o.start(when); o.stop(when + 0.35);
+    noise(0.015, vol * 0.4, 3000, 'highpass', when, musicBus);   // click
+  }
+  function riser(when, dur) {
+    const src = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+    src.buffer = noiseBuf; src.loop = true; f.type = 'bandpass'; f.Q.value = 3;
+    f.frequency.setValueAtTime(400, when); f.frequency.exponentialRampToValueAtTime(9000, when + dur);
+    g.gain.setValueAtTime(0.0001, when); g.gain.exponentialRampToValueAtTime(0.12, when + dur);
+    src.connect(f); f.connect(g); g.connect(musicBus); src.start(when); src.stop(when + dur);
+  }
+  function musicLevel() {
+    if (state !== 'play' && state !== 'paused') return 0;
+    return score < 5 ? 1 : score < 20 ? 2 : 3;
+  }
   function musicTick() {
     if (!ac) return;
-    const want = !settings.music ? 0 : state === 'play' ? 0.45 : state === 'paused' || state === 'ad' ? 0.08 : 0.25;
+    const want = !settings.music ? 0 : state === 'play' ? 0.42 : state === 'paused' || state === 'ad' ? 0.08 : 0.22;
     musicBus.gain.setTargetAtTime(want, ac.currentTime, 0.3);
     if (!settings.music) return;
     if (nextStep < ac.currentTime) nextStep = ac.currentTime + 0.05;
+    const L = musicLevel();
     while (nextStep < ac.currentTime + 0.2) {
-      const s = stepIdx % 16, shift = [0, 0, 3, -2][Math.floor(stepIdx / 16) % 4];
-      if (BASS[s]) tone(midi(BASS[s] + shift), STEP * 1.8, 'triangle', 0.18, null, nextStep, musicBus);
-      if (s % 4 === 0) tone(110, 0.12, 'sine', 0.3, 40, nextStep, musicBus);
-      if (s % 4 === 2) noise(0.04, 0.05, 7000, 'highpass', nextStep, musicBus);
-      if (s === 4 || s === 12) noise(0.1, 0.07, 1800, 'bandpass', nextStep, musicBus);
+      const t = nextStep, s = stepIdx % 16, bar = Math.floor(stepIdx / 16), phrase = bar % 16;
+      const ch = PROG[bar % 4], root = ROOT[bar % 4];
+      const roll = phrase === 15 && L > 0, drop = phrase === 0 && s === 0 && L > 0;
+      // Drums
+      if (s % 4 === 0 && !(roll && s >= 8)) kick(t, L ? 0.55 : 0.18);
+      if (s % 4 === 2) noise(0.06, L ? 0.07 : 0.03, 8000, 'highpass', t, musicBus);       // open hat
+      if (L >= 1 && s % 2 === 1) noise(0.02, 0.03, 10000, 'highpass', t, musicBus);       // closed hat
+      if (L >= 1 && (s === 4 || s === 12)) { noise(0.14, 0.16, 1500, 'bandpass', t, musicBus); noise(0.08, 0.08, 4000, 'bandpass', t + 0.01, musicBus); }
+      if (roll && s >= 8) noise(0.05, 0.05 + 0.012 * (s - 8), 1800, 'bandpass', t, musicBus);   // snare roll into the drop
+      if (L >= 1 && phrase === 14 && s === 0) riser(t, STEP * 32);
+      if (drop) { noise(0.9, 0.12, 6000, 'highpass', t, musicBus); tone(55, 0.6, 'sine', 0.35, 30, t, musicBus); }   // crash + sub on the drop
+      // Bass: rolling off-beat octaves
+      if (s % 2 === 1 || (L === 0 && s % 4 === 2)) {
+        const n = root - 12 + (s % 4 === 3 ? 12 : 0);
+        voice([midi(n)], t, STEP * 1.6, { vol: L ? 0.16 : 0.07, cutoff: L ? 700 : 400, q: 4, detune: [0, 7] });
+      }
+      // Pumping supersaw chords (ducked after every kick)
+      if (L >= 2 && s % 4 === 0 && !roll) {
+        voice(ch.map(midi), t, STEP * 3.8, { vol: 0.045, cutoff: 2600, attack: STEP * 1.8, detune: [-14, 0, 14] });
+      }
+      if (L === 0 && s === 0) voice(ch.map(midi), t, STEP * 16, { vol: 0.03, cutoff: 900, attack: STEP * 6, detune: [-10, 10] });   // menu pad
+      // Arpeggio lead
+      if (L >= 3 && !roll) {
+        const pat = [0, 1, 2, 1, 0, 2, 1, 2];
+        const n = ch[pat[s % 8]] + 12 + (s >= 8 ? 12 * (bar % 2) : 0);
+        voice([midi(n)], t, STEP * 0.9, { vol: 0.05, cutoff: 3800, q: 2, type: 'square', detune: [0, 9] });
+      }
       nextStep += STEP; stepIdx++;
     }
   }
@@ -278,15 +335,33 @@
   };
   // Builds without the ad plugin (web, playtest APK) keep the 5-second placeholder ad.
   const adReady = () => (Ads.on ? Ads.rewardedReady : true);
+  // Daily ad schedule (Gee): a free power-up offer after every other run (runs 2, 4, 6, 8, 10; 5 a day),
+  // and a forced ad after runs 3, 7, 11 and so on. Never in a player's first 5 runs ever, never closer than 3 minutes.
+  const OFFERS_PER_DAY = 5;
+  let adDay = { day: '', runs: 0, offers: 0 };
+  try { adDay = Object.assign(adDay, JSON.parse(localStorage.getItem('coverdash-adday') || '{}')); } catch (e) {}
+  const saveAdDay = () => { try { localStorage.setItem('coverdash-adday', JSON.stringify(adDay)); } catch (e) {} };
+  function adDayRoll() { if (adDay.day !== today()) adDay = { day: today(), runs: 0, offers: 0 }; }
+  let offerOpen = false;   // this game-over screen is showing the power-up offer
   let forced = { runs: 0, at: 0 };
   try { forced = Object.assign(forced, JSON.parse(localStorage.getItem('coverdash-forced') || '{}')); } catch (e) {}
   const saveForced = () => { try { localStorage.setItem('coverdash-forced', JSON.stringify(forced)); } catch (e) {} };
   const nowS = () => Date.now() / 1000;
   function maybeForcedAd() {
-    if (!Ads.on || noAds || runMode === 'pure') return;
-    forced.runs += 1; saveForced();
-    if (runsPlayed < FORCED_GRACE || forced.runs < FORCED_EVERY || nowS() - forced.at < FORCED_GAP) return;
-    setTimeout(() => { if (state === 'over' && Ads.showInter()) { forced.runs = 0; forced.at = nowS(); saveForced(); } }, 700);
+    adDayRoll();
+    if (runMode === 'pure') { offerOpen = false; saveAdDay(); return; }
+    adDay.runs += 1;
+    offerOpen = adDay.runs % 2 === 0 && adDay.offers < OFFERS_PER_DAY;
+    saveAdDay();
+    if (!Ads.on || noAds) return;
+    if (runsPlayed < FORCED_GRACE || adDay.runs % FORCED_EVERY !== 3 || nowS() - forced.at < FORCED_GAP) return;
+    setTimeout(() => { if (state === 'over' && Ads.showInter()) { forced.at = nowS(); saveForced(); } }, 700);
+  }
+  function claimOffer() {
+    const type = INV_KEYS[Math.floor(Math.random() * INV_KEYS.length)];
+    adDayRoll(); adDay.offers += 1; saveAdDay(); offerOpen = false;
+    inv[type] += 1; saveInv();
+    toast = `Stocked 1 ${POWER[type].label}! Tap it in a run to use it`; toastT = 3;
   }
 
   const Store = {
@@ -358,6 +433,7 @@
     adPurpose = purpose; state = 'ad'; adLeft = AD_SECONDS;
   }
   function grantAd(purpose) {
+    if (purpose === 'offer') { state = 'over'; claimOffer(); return; }
     if (purpose === 'token') {
       if (adTokenDay !== today()) { adTokenDay = today(); adTokensToday = 0; }
       adTokensToday += 1; tokens += 1; saveTokens();
@@ -402,6 +478,9 @@
     { id: 'arctic',   name: 'Arctic',    ground: '#22323f', line: '#2d4152', cover: '#d8e6f0', player: '#ff7a45', score: 75 },
     { id: 'night',    name: 'Night Ops', ground: '#0d1512', line: '#17241e', cover: '#4b6b5a', player: '#b6ff6a', score: 150 },
     { id: 'neon',     name: 'Neon Grid', ground: '#150c26', line: '#2b1652', cover: '#38e8ff', player: '#ff4fd8', price: '$1' },
+    { id: 'sunset',   name: 'Sunset',    ground: '#2a1b2e', line: '#3a2540', cover: '#ffb38a', player: '#ffd166', coins: 300 },
+    { id: 'toxic',    name: 'Toxic',     ground: '#0f1f12', line: '#1a331d', cover: '#9be15d', player: '#e05dff', coins: 800 },
+    { id: 'gold',     name: 'Gold Rush', ground: '#1d1a12', line: '#2c2717', cover: '#e8c15a', player: '#ffffff', coins: 2000 },
   ];
   // Milestone medals: earned by reaching a score, worn on the player circle. Pick one in the Skins screen.
   const MEDALS = [
@@ -423,9 +502,35 @@
     for (let k = 0; k < 10; k++) { const a = -Math.PI / 2 + k * Math.PI / 5, rr = k % 2 ? r * 0.22 : r * 0.52; ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); }
     ctx.fill();
   }
+  // ---------- XP, levels and coins ----------
+  // Each finished run: 10 XP + 1 per point, and 1 coin per 5 points. Level-ups give 50 coins and a stocked power-up.
+  // Coins buy coin-only skins.
+  const XP_BASE = 10, COIN_EVERY = 5, LEVEL_COINS = 50;
+  const xpNeed = lv => 100 + 25 * (lv - 1);
+  let prog = { xp: 0, level: 1, coins: 0 };
+  try { prog = Object.assign(prog, JSON.parse(localStorage.getItem('coverdash-prog') || '{}')); } catch (e) {}
+  const saveProg = () => { try { localStorage.setItem('coverdash-prog', JSON.stringify(prog)); } catch (e) {} };
+  let runGain = null;   // what the last run earned, for the game-over screen
+  function awardRun() {
+    const xp = XP_BASE + score, coins = Math.floor(score / COIN_EVERY), ups = [];
+    prog.xp += xp; prog.coins += coins;
+    while (prog.xp >= xpNeed(prog.level)) {
+      prog.xp -= xpNeed(prog.level); prog.level += 1; prog.coins += LEVEL_COINS;
+      const type = INV_KEYS[Math.floor(Math.random() * INV_KEYS.length)];
+      inv[type] += 1; ups.push(type);
+    }
+    if (ups.length) saveInv();
+    saveProg();
+    runGain = { xp, coins, ups };
+  }
+  function drawCoin(x, y, r) {
+    ctx.fillStyle = '#a8740a'; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ffd34d'; ctx.beginPath(); ctx.arc(x, y, r * 0.78, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#a8740a'; ctx.fillRect(x - r * 0.12, y - r * 0.45, r * 0.24, r * 0.9);
+  }
   let skinsOwned = {}, skin = 'concrete';
   try { skinsOwned = JSON.parse(localStorage.getItem('coverdash-skins') || '{}'); skin = localStorage.getItem('coverdash-skin') || 'concrete'; } catch (e) {}
-  const skinUnlocked = t => (!t.score && !t.price) || (t.score && best >= t.score) || !!skinsOwned[t.id];
+  const skinUnlocked = t => (!t.score && !t.price && !t.coins) || (t.score && best >= t.score) || !!skinsOwned[t.id];
   function applyTheme(id) {
     const t = THEMES.find(t => t.id === id && skinUnlocked(t)) || THEMES[0];
     skin = t.id;
@@ -440,7 +545,7 @@
     side: 'Side attacker! Get out of its line, or hide on the far side of cover.',
     marked: 'Marked cover drops a power-up when it gets destroyed.',
     gate: 'Speed gate! A turret shot charges it. Then run through for a 10-cover boost.',
-    collect: 'Power-up collected! Tap it at the bottom left to use it.',   // new id so players who saw the old tap-to-use hint see this once
+    autouse: 'Power-up! It kicks in as soon as marked cover breaks.',
   };
   let seenHints = {}, hint = null, slowMo = 0;
   try { seenHints = JSON.parse(localStorage.getItem('coverdash-hints') || '{}'); } catch (e) {}
@@ -706,7 +811,7 @@
     flankers = []; flankTimer = rand(5, 7); lastFlankShot = -9; gameT = 0;
     revived = false; reviveMul = 1; invuln = 0; canRevive = false;
     adUsed = false; tokensUsed = 0; earnedToken = false; scorePop = 0; bestFlashT = 0; passedBest = false; newSkins = []; hint = null;
-    pickups = []; beams = []; pops = []; boardResult = null; boostEnd = 0; boostBlink = 0; jam = 0; guard = 0; guardCd = 0; drone = 0;
+    pickups = []; beams = []; pops = []; runGain = null; offerOpen = false; boardResult = null; boostEnd = 0; boostBlink = 0; jam = 0; guard = 0; guardCd = 0; drone = 0;
     camY = player.y - PLAYER_SCREEN_Y;
     score = 0; shake = 0; flash = 0; newBest = false;
     syncTurrets();
@@ -954,6 +1059,7 @@
     // Every run counts on Anything Goes. Runs with no stocked items and no continues also count on Pure Skill.
     // Pure Skill runs count on both ladders (they're strictly harder); normal runs count on Anything Goes.
     maybeForcedAd();
+    awardRun();
     const pure = runMode === 'pure';
     boardResult = { pure, ranks: Boards.submit(score, pure ? ['pure', 'any'] : ['any']), prevBest: best, prevDaily: pure ? dailyBest() : 0 };
     if (pure && score > dailyBest()) { daily = { day: utcDay(), best: score }; try { localStorage.setItem('coverdash-daily', JSON.stringify(daily)); } catch (e) {} }
@@ -1171,10 +1277,12 @@
                 burst(s.cx, s.cy, C.concrete, 12, 200, 7);   // chunky debris
                 sfx('coverBreak'); vibrate(20);
                 // Auto-collect: a marked cover's power-up goes straight into your stock, so you never have to stop for it
+                // Auto-use: a marked cover's power-up fires the moment the cover breaks (it never goes into stock).
+                // If the same power is already running it restarts at full time; armor still caps at 2.
                 if (s.power) {
-                  inv[s.power] += 1; saveInv(); invFlash[s.power] = 1;
-                  pops.push({ x: s.cx, y: s.cy, text: `+1 ${POWER[s.power].label}`, col: POWER[s.power].color, t: 1.2 });
-                  sfx('power'); showHint('collect', true);
+                  activate({ type: s.power, x: s.cx, y: s.cy });
+                  pops.push({ x: s.cx, y: s.cy, text: POWER[s.power].label, col: POWER[s.power].color, t: 1.2 });
+                  showHint('autouse', true);
                 }
               }
               break;
@@ -1609,7 +1717,9 @@
     ctx.fillText('COVER', W / 2, 150);
     ctx.fillText('DASH', W / 2, 200);
     if (LOGO_WIDE.complete) { ctx.globalAlpha = 0.9; ctx.drawImage(LOGO_WIDE, W / 2 - 54, 30, 108, 36); ctx.globalAlpha = 1; }
-    if (best > 0) { ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 13px ${FONT}`; ctx.fillText(`BEST ${best}`, W / 2, 230); }
+    ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 13px ${FONT}`;
+    const tl = `${best > 0 ? `BEST ${best}  ·  ` : ''}LV ${prog.level}  ·  ${prog.coins}`;
+    ctx.fillText(tl, W / 2 - 6, 230); drawCoin(W / 2 - 6 + ctx.measureText(tl).width / 2 + 10, 226, 6);
     uiBtn(80, 392, 200, 50, 'PLAY', startPlay, 'primary');
     uiBtn(80, 450, 200, 44, 'PURE SKILL', () => { state = 'pure'; }, 'accent', `${pureLeft()} play token${pureLeft() === 1 ? '' : 's'} left today`);
     uiBtn(80, 502, 200, 36, 'LEADERBOARDS', () => { state = 'boards'; }, 'ghost');
@@ -1723,28 +1833,40 @@
     ctx.textAlign = 'center'; ctx.fillStyle = C.player; ctx.font = `700 34px ${FONT}`;
     ctx.fillText('SKINS', W / 2, 90);
     ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 12px ${FONT}`;
-    ctx.fillText('Reach a score to unlock, or buy in test mode', W / 2, 112);
+    ctx.fillText('Unlock by score, coins, or purchase', W / 2 - 34, 112);
+    drawCoin(W / 2 + 112, 108, 7); ctx.textAlign = 'left'; ctx.fillStyle = '#ffd34d'; ctx.font = `700 13px ${FONT}`;
+    ctx.fillText(prog.coins, W / 2 + 123, 113);
     THEMES.forEach((t, i) => {
-      const x = 28, y = 128 + i * 66, w = W - 56, h = 58, open = skinUnlocked(t), on = skin === t.id;
+      const cw = (W - 64) / 2, x = 28 + (i % 2) * (cw + 8), y = 124 + Math.floor(i / 2) * 84, w = cw, h = 76;
+      const open = skinUnlocked(t), on = skin === t.id;
       uiHits.push({ x, y, w, h, action: () => {
         if (open) { applyTheme(t.id); return; }
-        if (t.price) purchase(t.id);
+        if (t.price) { purchase(t.id); return; }
+        if (t.coins) {
+          if (prog.coins >= t.coins) {
+            prog.coins -= t.coins; saveProg();
+            skinsOwned[t.id] = 1; try { localStorage.setItem('coverdash-skins', JSON.stringify(skinsOwned)); } catch (e) {}
+            applyTheme(t.id); toast = `${t.name} unlocked!`; toastT = 2;
+          } else { toast = `${t.coins - prog.coins} more coins needed`; toastT = 2; }
+        }
       } });
       ctx.fillStyle = on ? 'rgba(238,241,246,0.12)' : 'rgba(238,241,246,0.05)'; ctx.fillRect(x, y, w, h);
       ctx.strokeStyle = on ? C.player : 'rgba(238,241,246,0.25)'; ctx.lineWidth = on ? 2 : 1; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
       // little preview of the skin
-      ctx.fillStyle = t.ground; ctx.fillRect(x + 8, y + 7, 84, 44);
+      const px = x + 6, py = y + 6, pw = w - 12, ph = 32;
+      ctx.fillStyle = t.ground; ctx.fillRect(px, py, pw, ph);
       ctx.strokeStyle = t.line; ctx.lineWidth = 1; ctx.beginPath();
-      for (let gx = x + 18; gx < x + 92; gx += 18) { ctx.moveTo(gx, y + 7); ctx.lineTo(gx, y + 51); }
+      for (let gx = px + 12; gx < px + pw; gx += 16) { ctx.moveTo(gx, py); ctx.lineTo(gx, py + ph); }
       ctx.stroke();
-      ctx.fillStyle = t.cover; ctx.fillRect(x + 22, y + 16, 56, 9);
-      ctx.fillStyle = t.player; ctx.beginPath(); ctx.arc(x + 50, y + 37, 8, 0, Math.PI * 2); ctx.fill();
-      if (!open) { ctx.fillStyle = 'rgba(10,14,20,0.55)'; ctx.fillRect(x + 8, y + 7, 84, 44); }
-      ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.font = `700 16px ${FONT}`;
-      ctx.fillText(t.name, x + 106, y + 25);
-      ctx.font = `600 12px ${FONT}`; ctx.fillStyle = on ? C.player : 'rgba(238,241,246,0.6)';
-      const status = on ? 'EQUIPPED' : open ? 'Tap to equip' : t.price ? `${Store.price(t.id, t.price)} · tap to buy${Store.on ? '' : ' (test mode)'}` : `Reach ${t.score} to unlock`;
-      ctx.fillText(status, x + 106, y + 43);
+      ctx.fillStyle = t.cover; ctx.fillRect(px + 16, py + 8, 50, 8);
+      ctx.fillStyle = t.player; ctx.beginPath(); ctx.arc(px + pw - 36, py + 19, 7, 0, Math.PI * 2); ctx.fill();
+      if (!open) { ctx.fillStyle = 'rgba(10,14,20,0.55)'; ctx.fillRect(px, py, pw, ph); }
+      ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.font = `700 13px ${FONT}`;
+      ctx.fillText(t.name, x + 8, y + 54);
+      ctx.font = `600 10px ${FONT}`; ctx.fillStyle = on ? C.player : 'rgba(238,241,246,0.6)';
+      let status = on ? 'EQUIPPED' : open ? 'Tap to equip' : t.price ? `${Store.price(t.id, t.price)} · tap to buy${Store.on ? '' : ' (test)'}` : t.coins ? `${t.coins} coins · tap to unlock` : `Reach ${t.score} to unlock`;
+      if (!open && t.coins) { drawCoin(x + 13, y + 66, 5); ctx.fillStyle = prog.coins >= t.coins ? '#ffd34d' : 'rgba(238,241,246,0.6)'; ctx.fillText(status, x + 22, y + 70); }
+      else ctx.fillText(status, x + 8, y + 70);
     });
     // Medal row: worn on your circle. Earned by reaching a score.
     ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.font = `700 13px ${FONT}`; ctx.fillText('MEDAL', 30, 470);
@@ -1876,24 +1998,35 @@
       uiBtn(44, Math.max(y, 420), W - 88, 40, 'END RUN', endRun, 'ghost');
       return;
     }
-    panel(160, 330);
-    ctx.fillStyle = C.enemy; ctx.font = `700 34px ${FONT}`; ctx.fillText('SHOT DOWN', W / 2, 204);
-    ctx.fillStyle = C.ink; ctx.font = `700 56px ${FONT}`; ctx.fillText(score, W / 2, 262);
+    panel(146, 326);
+    ctx.fillStyle = C.enemy; ctx.font = `700 34px ${FONT}`; ctx.fillText('SHOT DOWN', W / 2, 188);
+    ctx.fillStyle = C.ink; ctx.font = `700 56px ${FONT}`; ctx.fillText(score, W / 2, 242);
     ctx.font = `600 14px ${FONT}`;
     ctx.fillStyle = newBest ? C.player : 'rgba(238,241,246,0.6)';
-    ctx.fillText(newBest ? 'NEW BEST!' : `BEST ${best}`, W / 2, 286);
+    ctx.fillText(newBest ? 'NEW BEST!' : `BEST ${best}`, W / 2, 264);
     // Which ladder this run counts on
     if (boardResult) {
       const br = boardResult, rank = br.ranks[br.pure ? 'pure' : 'any'];
       const label = (br.pure ? '✓ PURE SKILL RUN' : 'ANYTHING GOES RUN') + (rank ? `  ·  #${rank} ON THIS DEVICE` : '');
       ctx.font = `700 12px ${FONT}`;
       const cw = ctx.measureText(label).width + 24, col = br.pure ? '#5fe08a' : C.player;
-      ctx.fillStyle = br.pure ? 'rgba(95,224,138,0.14)' : 'rgba(242,193,78,0.14)'; ctx.fillRect(W / 2 - cw / 2, 296, cw, 22);
-      ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.strokeRect(W / 2 - cw / 2 + 0.5, 296.5, cw - 1, 21);
-      ctx.fillStyle = col; ctx.fillText(label, W / 2, 311);
+      ctx.fillStyle = br.pure ? 'rgba(95,224,138,0.14)' : 'rgba(242,193,78,0.14)'; ctx.fillRect(W / 2 - cw / 2, 274, cw, 22);
+      ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.strokeRect(W / 2 - cw / 2 + 0.5, 274.5, cw - 1, 21);
+      ctx.fillStyle = col; ctx.fillText(label, W / 2, 289);
+    }
+    // XP bar and what this run earned
+    if (runGain) {
+      const bx = 52, bw = W - 104, by = 306, f = Math.min(1, prog.xp / xpNeed(prog.level));
+      ctx.textAlign = 'left'; ctx.font = `700 12px ${FONT}`; ctx.fillStyle = C.ink; ctx.fillText(`LV ${prog.level}`, bx, by + 2);
+      ctx.fillStyle = 'rgba(238,241,246,0.12)'; ctx.fillRect(bx + 40, by - 6, bw - 150, 8);
+      ctx.fillStyle = '#7fd1ff'; ctx.fillRect(bx + 40, by - 6, (bw - 150) * f, 8);
+      ctx.textAlign = 'right'; ctx.fillStyle = '#7fd1ff'; ctx.fillText(`+${runGain.xp} XP`, bx + bw - 44, by + 2);
+      ctx.fillStyle = '#ffd34d'; ctx.fillText(`+${runGain.coins}`, bx + bw - 12, by + 2); drawCoin(bx + bw - 4, by - 2, 6);
+      ctx.textAlign = 'center';
     }
     ctx.font = `700 12px ${FONT}`; ctx.fillStyle = C.player;
     const notes = [];
+    if (runGain && runGain.ups.length) notes.push(`LEVEL UP! LV ${prog.level} · +${LEVEL_COINS * runGain.ups.length} COINS · +1 ${POWER[runGain.ups[0]].label} STOCKED`);
     // Near miss: just short of your best (or today's best on the daily course)
     if (boardResult && !newBest && score > 0) {
       const pb = boardResult.prevBest, pd = boardResult.prevDaily, near = b => Math.max(3, Math.ceil(b * 0.1));
@@ -1905,11 +2038,17 @@
     if (newSkins.length) notes.push(`SKIN UNLOCKED: ${newSkins.join(', ').toUpperCase()}`);
     if (earnedToken) notes.push(`+1 CONTINUE TOKEN FOR ${RUNS_PER_TOKEN} RUNS PLAYED`);
     else notes.push(`${RUNS_PER_TOKEN - runsPlayed % RUNS_PER_TOKEN} MORE RUNS TO A FREE TOKEN`);
-    notes.slice(0, 2).forEach((n, i) => { ctx.globalAlpha = /^(\+|SKIN|MEDAL|SO CLOSE|TIED)/.test(n) ? 1 : 0.6; ctx.fillText(n, W / 2, 338 + i * 16); });
+    notes.slice(0, 2).forEach((n, i) => { ctx.globalAlpha = /^(\+|SKIN|MEDAL|SO CLOSE|TIED|LEVEL)/.test(n) ? 1 : 0.6; ctx.fillText(n, W / 2, 330 + i * 16); });
     ctx.globalAlpha = 1;
-    uiBtn(60, 376, W - 120, 46, runMode === 'pure' ? (pureLeft() > 0 ? `PLAY AGAIN · ${pureLeft()} TOKEN${pureLeft() === 1 ? '' : 'S'} LEFT` : 'GET MORE TOKENS') : 'PLAY AGAIN', replay, 'primary');
-    uiBtn(60, 430, (W - 128) / 2, 36, 'MENU', toMenu, 'ghost');
-    uiBtn(68 + (W - 128) / 2, 430, (W - 128) / 2, 36, 'SHARE', () => { state = 'share'; }, 'ghost');
+    // Every other run: watch an ad (free with Remove Ads) to stock a random power-up. 5 a day.
+    if (offerOpen) {
+      uiBtn(44, 484, W - 88, 46, noAds ? 'CLAIM A FREE POWER-UP' : '▶ WATCH AD: FREE POWER-UP', () => {
+        if (noAds) claimOffer(); else startAd('offer');
+      }, 'accent', `Random power-up for your stock · ${OFFERS_PER_DAY - adDay.offers} left today`);
+    } else if (toastT > 0) { ctx.fillStyle = C.player; ctx.font = `700 13px ${FONT}`; ctx.fillText(toast, W / 2, 506); }
+    uiBtn(60, 366, W - 120, 46, runMode === 'pure' ? (pureLeft() > 0 ? `PLAY AGAIN · ${pureLeft()} TOKEN${pureLeft() === 1 ? '' : 'S'} LEFT` : 'GET MORE TOKENS') : 'PLAY AGAIN', replay, 'primary');
+    uiBtn(60, 420, (W - 128) / 2, 36, 'MENU', toMenu, 'ghost');
+    uiBtn(68 + (W - 128) / 2, 420, (W - 128) / 2, 36, 'SHARE', () => { state = 'share'; }, 'ghost');
   }
 
   function drawShare() {
@@ -1935,7 +2074,7 @@
     ctx.font = `700 22px ${FONT}`; ctx.fillText('AD PLACEHOLDER', W / 2, 290);
     ctx.font = `600 13px ${FONT}`; ctx.fillText('A real rewarded ad will play here', W / 2, 316);
     ctx.fillStyle = C.player; ctx.font = `700 16px ${FONT}`;
-    ctx.fillText(adPurpose !== 'revive' ? `Your token arrives in ${Math.ceil(adLeft)}…` : `Back in the fight in ${Math.ceil(adLeft)}…`, W / 2, 470);
+    ctx.fillText(adPurpose === 'offer' ? `Your power-up arrives in ${Math.ceil(adLeft)}…` : adPurpose !== 'revive' ? `Your token arrives in ${Math.ceil(adLeft)}…` : `Back in the fight in ${Math.ceil(adLeft)}…`, W / 2, 470);
   }
 
   // ---------- Input ----------
@@ -1971,7 +2110,7 @@
   }
   requestAnimationFrame(frame);
   Ads.init(); Store.init();
-  window.__game = { get tokens() { return tokens; }, get runs() { return runsPlayed; }, get state() { return state; }, get hint() { return hint; }, get skin() { return skin; }, get score() { return score; }, get flankers() { return flankers; }, get camY() { return camY; }, get pickups() { return pickups; }, get jam() { return jam; }, get guard() { return guard; }, get flankerAlive() { return flankers.length > 0; }, get player() { return player; }, get armor() { return armor; }, get rate() { return attackRate(); }, get inv() { return inv; }, get turrets() { return turrets; }, get best() { return [best, bestRate]; }, covers() { return liveCovers(camY, camY + H).map(c => ({ cx: c.cx, cy: c.cy, pts: c.pts, shape: c.shape, hp: c.hp })); }, path: findPath, get boardResult() { return boardResult; }, useStock, get pureLeft() { return pureLeft(); }, get mode() { return runMode; }, layout() { return rows.slice(0, 20).map(r => r.covers.map(c => c.shape + '@' + c.lane + ':' + c.pts[0].map(Math.round).join(',')).join('|')).join(' / '); }, rateAt(v) { const s0 = score; score = v; const r = attackRate(); score = s0; return r; }, kill() { if (state === "play") hitPlayer(); }, gates() { return rows.map(r => r.gate).filter(Boolean); }, get invFlash() { return invFlash; }, stockBlocked, markAhead() { const cs = liveCovers(camY, camY + H); for (const c of cs) { c.power = "jam"; c.hp = 1; } return cs.length; }, get boost() { return [boostEnd, boostBlink]; }, forceGate() { const r = score + 1, row = rowAt(r), lane = [0, 1, 2].find(l => !row.covers.some(c => c.lane === l) && !rowAt(score).covers.some(c => c.lane === l)); if (lane === undefined) return null; row.gate = { x: LANES[lane], y: -r * GAP + 100, used: false, charged: false, chargeT: 0 }; return row.gate; } };
+  window.__game = { get tokens() { return tokens; }, get runs() { return runsPlayed; }, get state() { return state; }, get hint() { return hint; }, get skin() { return skin; }, get score() { return score; }, get flankers() { return flankers; }, get camY() { return camY; }, get pickups() { return pickups; }, get jam() { return jam; }, get guard() { return guard; }, get flankerAlive() { return flankers.length > 0; }, get player() { return player; }, get armor() { return armor; }, get rate() { return attackRate(); }, get inv() { return inv; }, get turrets() { return turrets; }, get best() { return [best, bestRate]; }, covers() { return liveCovers(camY, camY + H).map(c => ({ cx: c.cx, cy: c.cy, pts: c.pts, shape: c.shape, hp: c.hp })); }, path: findPath, get boardResult() { return boardResult; }, useStock, get pureLeft() { return pureLeft(); }, get mode() { return runMode; }, layout() { return rows.slice(0, 20).map(r => r.covers.map(c => c.shape + '@' + c.lane + ':' + c.pts[0].map(Math.round).join(',')).join('|')).join(' / '); }, rateAt(v) { const s0 = score; score = v; const r = attackRate(); score = s0; return r; }, kill() { if (state === "play") hitPlayer(); }, gates() { return rows.map(r => r.gate).filter(Boolean); }, get invFlash() { return invFlash; }, stockBlocked, markAhead() { const cs = liveCovers(camY, camY + H); for (const c of cs) { c.power = "jam"; c.hp = 1; } return cs.length; }, get prog() { return prog; }, get offerOpen() { return offerOpen; }, get adDay() { return adDay; }, get boost() { return [boostEnd, boostBlink]; }, forceGate() { const r = score + 1, row = rowAt(r), lane = [0, 1, 2].find(l => !row.covers.some(c => c.lane === l) && !rowAt(score).covers.some(c => c.lane === l)); if (lane === undefined) return null; row.gate = { x: LANES[lane], y: -r * GAP + 100, used: false, charged: false, chargeT: 0 }; return row.gate; } };
 })();
 </script>
 </body></html>
