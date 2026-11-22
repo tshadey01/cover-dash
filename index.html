@@ -440,7 +440,7 @@
     side: 'Side attacker! Get out of its line, or hide on the far side of cover.',
     marked: 'Marked cover drops a power-up when it gets destroyed.',
     gate: 'Speed gate! A turret shot charges it. Then run through for a 10-cover boost.',
-    pickup: 'Power-up collected! Tap it at the bottom left to use it.',
+    collect: 'Power-up collected! Tap it at the bottom left to use it.',   // new id so players who saw the old tap-to-use hint see this once
   };
   let seenHints = {}, hint = null, slowMo = 0;
   try { seenHints = JSON.parse(localStorage.getItem('coverdash-hints') || '{}'); } catch (e) {}
@@ -1174,7 +1174,7 @@
                 if (s.power) {
                   inv[s.power] += 1; saveInv(); invFlash[s.power] = 1;
                   pops.push({ x: s.cx, y: s.cy, text: `+1 ${POWER[s.power].label}`, col: POWER[s.power].color, t: 1.2 });
-                  sfx('power'); showHint('pickup', true);
+                  sfx('power'); showHint('collect', true);
                 }
               }
               break;
