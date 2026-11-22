@@ -62,14 +62,14 @@
   const POWER_CHANCE = 0.025;          // chance any cover is a marked power-up cover
   const PICKUP_LIFE = 9;                // seconds a dropped power-up stays before fading
   // Attack speed (how often enemies fire). 1 = starting pace.
-  const RATE_STEP = 0.10;               // +10% fire rate every 10 points, no ceiling (300 points = 4x)
+  const FULL_BONUS_AT = 100;            // a new player's turrets reach +100% fire rate (+10% move speed) at 100 points
+  const BONUS_PAST_BEST = 10;           // after that, the +100% point sits 10 past your best score (normal mode only)
   const BASE_PERIOD = 2.6;              // average seconds between shots per top gun at 1x
   const MIN_AIM = 0.42, MIN_LOCK = 0.32; // fairness: warnings never get shorter than this (0.74s total)
   const BURST_GAP = 0.13;               // seconds between shots when a gun fires a quick burst
   const MAX_FLANKERS = 4;               // most side attackers on screen at once
   const FLANK_EVERY = 40;               // one more side attacker allowed every 40 points
   const FLANK_GAP = 0.9;                // side attackers never fire within this many seconds of each other
-  const NEAR_BEST = 0.6;                // how hard the ramp near your high score pushes
   const REVIVE_CUT = 0.78;              // reviving cuts attack speed by 22%
   const AD_SECONDS = 5;                 // length of the simulated ad
   const DRIFT_START = 20;               // score when the top guns start drifting side to side
@@ -121,8 +121,8 @@
   try { best = +localStorage.getItem('coverdash-best') || 0; bestRate = +localStorage.getItem('coverdash-best-rate') || 1; } catch (e) {}
 
   // ---------- Game state ----------
-  let state = 'title';   // title (main menu) | play | paused | dying | over | ad | share | store | skins | settings
-  let beams = [], boostEnd = 0, boostBlink = 0, adUsed, tokensUsed, earnedToken, adPurpose, sharePlatform, scorePop, bestFlashT, passedBest, newSkins, firstRun, revived, reviveMul, invuln, adLeft, deathRate, canRevive, firstPowerRow, rows, nextFork, player, armor, pickups, jam, guard, guardCd, drone, turrets, flankers, flankTimer, lastFlankShot, gameT, bullets, parts, camY, score, shake, flash, overAt, newBest;
+  let state = 'title';   // title (main menu) | play | paused | dying | over | ad | share | store | skins | settings | boards | pure
+  let beams = [], runMode = 'any', boardResult = null, boardLadder = 'pure', boardScope = 'region', boostEnd = 0, boostBlink = 0, adUsed, tokensUsed, earnedToken, adPurpose, sharePlatform, scorePop, bestFlashT, passedBest, newSkins, firstRun, revived, reviveMul, invuln, adLeft, deathRate, canRevive, firstPowerRow, rows, nextFork, player, armor, pickups, jam, guard, guardCd, drone, turrets, flankers, flankTimer, lastFlankShot, gameT, bullets, parts, camY, score, shake, flash, overAt, newBest;
 
   // ---------- Settings (kept between sessions) ----------
   const settings = { sfx: true, music: true, vibe: true };
@@ -216,6 +216,13 @@
     [adTokenDay, adTokensToday] = JSON.parse(localStorage.getItem('coverdash-adtokens') || '["",0]');
   } catch (e) {}
   const today = () => new Date().toDateString();
+  // Pure Skill play tokens: 2 free a day, +1 for watching an ad, +1 to buy. Resets daily.
+  const PURE_FREE = 2, PURE_PRICE = '$0.10';   // Apple's lowest price is $0.29; Google Play allows $0.10
+  let pure = { day: '', used: 0, ad: 0, bought: 0 };
+  try { pure = Object.assign(pure, JSON.parse(localStorage.getItem('coverdash-pure') || '{}')); } catch (e) {}
+  const savePure = () => { try { localStorage.setItem('coverdash-pure', JSON.stringify(pure)); } catch (e) {} };
+  function pureDay() { if (pure.day !== today()) { pure = { day: today(), used: 0, ad: 0, bought: 0 }; savePure(); } }
+  const pureLeft = () => { pureDay(); return PURE_FREE + pure.ad + pure.bought - pure.used; };
   const adTokensLeft = () => AD_TOKENS_PER_DAY - (adTokenDay === today() ? adTokensToday : 0);
   function saveTokens() {
     try {
@@ -288,7 +295,7 @@
   // a slab, a circle, or a semicircle or triangle at a random angle. Round shapes
   // are many-sided polygons, so bullets, pathing and snapping treat them like any other cover.
   // Fairness: cover gets sturdier as fire rate climbs (+5% hits per 10 points), so hiding still works late in a run.
-  const coverHp = base => Math.round(base * (1 + 0.5 * RATE_STEP * Math.floor((score || 0) / 10)));
+  const coverHp = base => Math.round(base * (1 + 0.5 * (stepRate() - 1)));
   function makeCover(lane, rowY, shape) {
     const cx = LANES[lane];
     let pts, cy;
@@ -348,12 +355,12 @@
       covers.forEach(c => c.row = n);
       // Marked cover: drops a power-up when it gets blown apart.
       // One is guaranteed somewhere in the first 20 covers; after that each cover has a 2.5% chance.
-      const marked = n === firstPowerRow || (n > 0 && n !== firstPowerRow && Math.random() < POWER_CHANCE);
+      const marked = runMode !== 'pure' && (n === firstPowerRow || (n > 0 && n !== firstPowerRow && Math.random() < POWER_CHANCE));
       const power = marked ? ['jam', 'guard', 'armor'][randInt(0, 2)] : null;
       if (power) covers[Math.floor(Math.random() * covers.length)].power = power;
       // Acceleration gate: rare, always facing forward, in a lane clear of the cover around it.
       let gate = null;
-      if (n >= 6 && covers.length === 1 && Math.random() < GATE_CHANCE) gate = makeGate(n, covers, prev);
+      if (runMode !== 'pure' && n >= 6 && covers.length === 1 && Math.random() < GATE_CHANCE) gate = makeGate(n, covers, prev);
       rows.push({ covers, fork: covers.length > 1, gate });
     }
     return rows[i];
@@ -512,27 +519,65 @@
     flankers = []; flankTimer = rand(5, 7); lastFlankShot = -9; gameT = 0;
     revived = false; reviveMul = 1; invuln = 0; canRevive = false;
     adUsed = false; tokensUsed = 0; earnedToken = false; scorePop = 0; bestFlashT = 0; passedBest = false; newSkins = []; hint = null;
-    pickups = []; beams = []; boostEnd = 0; boostBlink = 0; jam = 0; guard = 0; guardCd = 0; drone = 0;
+    pickups = []; beams = []; boardResult = null; boostEnd = 0; boostBlink = 0; jam = 0; guard = 0; guardCd = 0; drone = 0;
     camY = player.y - PLAYER_SCREEN_Y;
     score = 0; shake = 0; flash = 0; newBest = false;
     syncTurrets();
     firstRun = !seenHints.move;
     if (firstRun) for (const t of turrets) t.timer += 2.5;   // a moment to get your bearings on the very first run
   }
-  function startPlay() { reset(); state = 'play'; showHint('move'); }
+  function startPlay() { runMode = 'any'; reset(); state = 'play'; showHint('move'); }
+  // Pure Skill: a separate mode with no items, gates or continues. Entry costs a play token.
+  function startPure() {
+    if (pureLeft() <= 0) { state = 'pure'; return; }
+    pureDay(); pure.used += 1; savePure();
+    runMode = 'pure'; reset(); state = 'play'; showHint('move');
+  }
+  const replay = () => (runMode === 'pure' ? startPure() : startPlay());
   function toMenu() { state = 'title'; hint = null; }
+
+  // ---------- Leaderboards: two ladders, each with Region and Global views ----------
+  // For now scores live on this device. When the game ships, swap submit() and top() for
+  // Google Play Games / Apple Game Center calls; nothing else in the game needs to change.
+  const LADDERS = {
+    pure: { name: 'PURE SKILL', desc: 'No store items and no continues' },
+    any: { name: 'ANYTHING GOES', desc: 'Items and continues allowed' },
+  };
+  const BOARD_SIZE = 10;
+  const Boards = {
+    online: false,
+    region: (() => { try { const l = new Intl.Locale(navigator.language || 'en-US'); return (l.maximize ? l.maximize() : l).region || 'LOCAL'; } catch (e) { return 'LOCAL'; } })(),
+    load() { try { return JSON.parse(localStorage.getItem('coverdash-boards') || '{}'); } catch (e) { return {}; } },
+    // Records a finished run on the given ladders. Returns { ladder: rank } for each list it made.
+    submit(score, ladders) {
+      const d = this.load(), at = Date.now(), ranks = {};
+      for (const id of ladders) {
+        const list = (d[id] || []).concat({ score, at, region: this.region });
+        list.sort((a, b) => b.score - a.score || a.at - b.at);
+        d[id] = list.slice(0, BOARD_SIZE);
+        const i = d[id].findIndex(e => e.at === at);
+        if (i >= 0) ranks[id] = i + 1;
+      }
+      try { localStorage.setItem('coverdash-boards', JSON.stringify(d)); } catch (e) {}
+      return ranks;
+    },
+    top(ladder, scope) {
+      const list = this.load()[ladder] || [];
+      return scope === 'region' ? list.filter(e => e.region === this.region) : list;
+    },
+  };
 
   function difficulty() { return Math.min(score / 25, 1); }
 
   // Attack speed = steps every 10 points x a ramp that climbs as you near your high score x revive discount.
   // The ramp's ceiling grows with ln(attack speed you died at last time), so beating your best keeps getting harder.
-  function stepRate() { return 1 + RATE_STEP * Math.floor(score / 10); }
-  function nearBestRamp() {
-    if (best <= 0) return 1;
-    const c = Math.min(score / best, 1);
-    return 1 + NEAR_BEST * Math.log(1 + bestRate) * c * c * c;
-  }
-  function attackRate() { return stepRate() * nearBestRamp() * reviveMul; }
+  // Personal difficulty: fire rate climbs every 10 points and hits +100% at your "full bonus" point,
+  // which is 10 past your best score (never below 100). It keeps climbing past that with no ceiling.
+  // So beating your best is always a bit gentler than the run that set it.
+  // Pure Skill uses the same fixed curve for everyone, so its leaderboard stays comparable.
+  function bonusPoint() { return runMode === 'pure' ? FULL_BONUS_AT : Math.max(FULL_BONUS_AT, best + BONUS_PAST_BEST); }
+  function stepRate() { return 1 + Math.floor((score || 0) / 10) * 10 / bonusPoint(); }
+  function attackRate() { return stepRate() * reviveMul; }
   function turretCount() { return score < 3 ? 1 : score < 8 ? 2 : 3; }
 
   function syncTurrets() {
@@ -632,7 +677,7 @@
   const SLOT = k => ({ x: 26 + k * 38, y: H - 72, r: 16 });
 
   function useStock(type) {
-    if (state !== 'play' || inv[type] <= 0) return;
+    if (state !== 'play' || inv[type] <= 0 || runMode === 'pure') return;   // Pure Skill: no items
     if (type === 'armor' && armor >= ARMOR_MAX) return;   // don't waste one when already full
     inv[type] -= 1; saveInv();
     activate({ type, x: player.x, y: player.y });
@@ -704,11 +749,11 @@
     sfx('hurt'); vibrate([60, 40, 140]);
     burst(player.x, player.y, C.player, 26, 260);
     burst(player.x, player.y, C.enemy, 10, 180);
-    deathRate = stepRate() * nearBestRamp();   // saved without the revive discount, so ads never make later runs easier
+    deathRate = stepRate();   // saved without the revive discount, so ads never make later runs easier
     setTimeout(() => {
       state = 'over';
       overAt = performance.now();
-      canRevive = (!adUsed && (noAds || adReady())) || (tokens > 0 && tokensUsed < TOKENS_PER_RUN);
+      canRevive = runMode !== 'pure' && ((!adUsed && (noAds || adReady())) || (tokens > 0 && tokensUsed < TOKENS_PER_RUN));
       if (!canRevive) endRun();
     }, 700);
   }
@@ -720,6 +765,10 @@
     if (runsPlayed % RUNS_PER_TOKEN === 0) { tokens += 1; earnedToken = true; }
     saveTokens();
     overAt = performance.now();
+    // Every run counts on Anything Goes. Runs with no stocked items and no continues also count on Pure Skill.
+    // Pure Skill runs count on both ladders (they're strictly harder); normal runs count on Anything Goes.
+    const pure = runMode === 'pure';
+    boardResult = { pure, ranks: Boards.submit(score, pure ? ['pure', 'any'] : ['any']) };
     if (score > best) {
       newSkins = THEMES.filter(t => t.score && best < t.score && score >= t.score).map(t => t.name);
       best = score; bestRate = deathRate; newBest = true;
@@ -763,6 +812,8 @@
           if (adTokenDay !== today()) { adTokenDay = today(); adTokensToday = 0; }
           adTokensToday += 1; tokens += 1; saveTokens();
           state = 'store'; toast = 'Got 1 continue token'; toastT = 2;
+        } else if (adPurpose === 'pure') {
+          pureDay(); pure.ad = 1; savePure(); state = 'pure'; toast = 'Got 1 Pure Skill play token'; toastT = 2;
         } else revive();
       }
       return;
@@ -1042,6 +1093,8 @@
     if (state === 'store') { drawStore(); ctx.restore(); return; }
     if (state === 'skins') { drawSkins(); ctx.restore(); return; }
     if (state === 'settings') { drawSettings(); ctx.restore(); return; }
+    if (state === 'boards') { drawBoards(); ctx.restore(); return; }
+    if (state === 'pure') { drawPure(); ctx.restore(); return; }
 
     ctx.save();
     ctx.translate(0, -camY);
@@ -1266,7 +1319,7 @@
       ctx.textAlign = 'right'; ctx.font = `600 11px ${FONT}`; ctx.fillStyle = 'rgba(255,90,79,0.75)';
       ctx.fillText(`ATTACK x${attackRate().toFixed(2)}`, W - 12, H - 12);
     }
-    drawInventory();
+    if (runMode !== 'pure') drawInventory();
     ctx.textAlign = 'center';
     // Active power-ups, shown just under the turret row
     let hy = TURRET_Y + 44;
@@ -1332,10 +1385,12 @@
     ctx.fillText('COVER', W / 2, 150);
     ctx.fillText('DASH', W / 2, 200);
     if (best > 0) { ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 13px ${FONT}`; ctx.fillText(`BEST ${best}`, W / 2, 230); }
-    uiBtn(80, 410, 200, 52, 'PLAY', startPlay, 'primary');
-    uiBtn(80, 474, 200, 40, 'SKINS', () => { state = 'skins'; }, 'ghost');
-    uiBtn(80, 522, 200, 40, 'STORE', () => { state = 'store'; }, 'ghost');
-    uiBtn(80, 570, 200, 40, 'SETTINGS', () => { state = 'settings'; }, 'ghost');
+    uiBtn(80, 392, 200, 50, 'PLAY', startPlay, 'primary');
+    uiBtn(80, 450, 200, 44, 'PURE SKILL', () => { state = 'pure'; }, 'accent', `${pureLeft()} play token${pureLeft() === 1 ? '' : 's'} left today`);
+    uiBtn(80, 502, 200, 36, 'LEADERBOARDS', () => { state = 'boards'; }, 'ghost');
+    uiBtn(80, 546, 96, 36, 'SKINS', () => { state = 'skins'; }, 'ghost');
+    uiBtn(184, 546, 96, 36, 'STORE', () => { state = 'store'; }, 'ghost');
+    uiBtn(80, 590, 200, 36, 'SETTINGS', () => { state = 'settings'; }, 'ghost');
   }
 
   function drawHint() {
@@ -1357,6 +1412,69 @@
     uiBtn(80, 384, 200, 40, 'MAIN MENU', toMenu, 'ghost');
     uiBtn(80, 450, 96, 36, settings.sfx ? 'SOUND ON' : 'SOUND OFF', () => { settings.sfx = !settings.sfx; saveSettings(); }, 'ghost');
     uiBtn(184, 450, 96, 36, settings.music ? 'MUSIC ON' : 'MUSIC OFF', () => { settings.music = !settings.music; saveSettings(); }, 'ghost');
+  }
+
+  function drawPure() {
+    const left = pureLeft();
+    ctx.textAlign = 'center'; ctx.fillStyle = '#5fe08a'; ctx.font = `700 34px ${FONT}`;
+    ctx.fillText('PURE SKILL', W / 2, 110);
+    ctx.fillStyle = 'rgba(238,241,246,0.75)'; ctx.font = `600 13px ${FONT}`;
+    ctx.fillText('No items. No speed gates. No continues.', W / 2, 140);
+    ctx.fillText('Just you and the cover, on its own leaderboard.', W / 2, 158);
+    ctx.fillStyle = C.ink; ctx.font = `700 54px ${FONT}`; ctx.fillText(left, W / 2, 236);
+    ctx.font = `600 13px ${FONT}`; ctx.fillStyle = 'rgba(238,241,246,0.6)';
+    ctx.fillText(`PLAY TOKEN${left === 1 ? '' : 'S'} LEFT TODAY`, W / 2, 258);
+    let y = 286;
+    if (left > 0) uiBtn(60, y, W - 120, 50, 'START RUN', startPure, 'primary', 'Uses 1 play token');
+    else { ctx.fillStyle = C.player; ctx.font = `700 14px ${FONT}`; ctx.fillText('Out of play tokens for today', W / 2, y + 30); }
+    y += 62;
+    if (!pure.ad) {
+      uiBtn(60, y, W - 120, 44, noAds ? 'CLAIM +1 TOKEN' : 'WATCH AD FOR +1', () => {
+        if (noAds) { pureDay(); pure.ad = 1; savePure(); toast = 'Got 1 Pure Skill play token'; toastT = 2; }
+        else { adPurpose = 'pure'; state = 'ad'; adLeft = AD_SECONDS; }
+      }, 'ghost', noAds ? 'Free with Remove Ads · once a day' : 'Once a day');
+      y += 52;
+    }
+    if (!pure.bought) {
+      uiBtn(60, y, W - 120, 44, `BUY +1 TOKEN · ${PURE_PRICE}`, () => { pureDay(); pure.bought = 1; savePure(); toast = 'Bought 1 play token (simulated)'; toastT = 2; }, 'ghost', 'Once a day');
+      y += 52;
+    }
+    ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(238,241,246,0.45)'; ctx.font = `600 11px ${FONT}`;
+    ctx.fillText(`${PURE_FREE} free tokens a day, up to ${PURE_FREE + 2} with the extras. Resets at midnight.`, W / 2, 516);
+    if (toastT > 0) { ctx.fillStyle = C.player; ctx.font = `700 13px ${FONT}`; ctx.fillText(toast, W / 2, 540); }
+    uiBtn(100, 570, W - 200, 40, 'BACK', toMenu, 'ghost');
+  }
+
+  function drawBoards() {
+    ctx.textAlign = 'center'; ctx.fillStyle = C.player; ctx.font = `700 30px ${FONT}`;
+    ctx.fillText('LEADERBOARDS', W / 2, 92);
+    const bw = (W - 72) / 2;
+    uiBtn(32, 112, bw, 38, 'PURE SKILL', () => { boardLadder = 'pure'; }, boardLadder === 'pure' ? 'primary' : 'ghost');
+    uiBtn(40 + bw, 112, bw, 38, 'ANYTHING GOES', () => { boardLadder = 'any'; }, boardLadder === 'any' ? 'primary' : 'ghost');
+    uiBtn(32, 158, bw, 32, `REGION · ${Boards.region}`, () => { boardScope = 'region'; }, boardScope === 'region' ? 'accent' : 'ghost');
+    uiBtn(40 + bw, 158, bw, 32, 'GLOBAL', () => { boardScope = 'global'; }, boardScope === 'global' ? 'accent' : 'ghost');
+    ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 12px ${FONT}`;
+    ctx.fillText(LADDERS[boardLadder].desc, W / 2, 212);
+    const list = Boards.top(boardLadder, boardScope);
+    if (!list.length) {
+      ctx.fillStyle = 'rgba(238,241,246,0.5)'; ctx.font = `600 14px ${FONT}`;
+      ctx.fillText('No runs here yet. Go set one!', W / 2, 300);
+    }
+    list.forEach((e, i) => {
+      const y = 230 + i * 30;
+      ctx.fillStyle = i % 2 ? 'rgba(238,241,246,0.03)' : 'rgba(238,241,246,0.07)'; ctx.fillRect(32, y, W - 64, 28);
+      ctx.font = `700 14px ${FONT}`; ctx.textAlign = 'left';
+      ctx.fillStyle = i === 0 ? C.player : C.ink; ctx.fillText(`#${i + 1}`, 44, y + 19);
+      ctx.fillStyle = C.ink; ctx.fillText('YOU', 90, y + 19);
+      ctx.fillStyle = 'rgba(238,241,246,0.5)'; ctx.font = `600 11px ${FONT}`;
+      ctx.fillText(new Date(e.at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }), 136, y + 19);
+      ctx.textAlign = 'right'; ctx.fillStyle = i === 0 ? C.player : C.ink; ctx.font = `700 16px ${FONT}`;
+      ctx.fillText(e.score, W - 44, y + 20);
+    });
+    ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(238,241,246,0.45)'; ctx.font = `600 11px ${FONT}`;
+    ctx.fillText('Test build: showing your best runs on this device.', W / 2, 546);
+    ctx.fillText('Online rankings arrive with the store release.', W / 2, 561);
+    uiBtn(100, 576, W - 200, 40, 'BACK', toMenu, 'ghost');
   }
 
   function drawSettings() {
@@ -1511,22 +1629,32 @@
       uiBtn(44, Math.max(y, 420), W - 88, 40, 'END RUN', endRun, 'ghost');
       return;
     }
-    panel(170, 300);
-    ctx.fillStyle = C.enemy; ctx.font = `700 34px ${FONT}`; ctx.fillText('SHOT DOWN', W / 2, 216);
-    ctx.fillStyle = C.ink; ctx.font = `700 56px ${FONT}`; ctx.fillText(score, W / 2, 278);
+    panel(160, 330);
+    ctx.fillStyle = C.enemy; ctx.font = `700 34px ${FONT}`; ctx.fillText('SHOT DOWN', W / 2, 204);
+    ctx.fillStyle = C.ink; ctx.font = `700 56px ${FONT}`; ctx.fillText(score, W / 2, 262);
     ctx.font = `600 14px ${FONT}`;
     ctx.fillStyle = newBest ? C.player : 'rgba(238,241,246,0.6)';
-    ctx.fillText(newBest ? 'NEW BEST!' : `BEST ${best}`, W / 2, 304);
+    ctx.fillText(newBest ? 'NEW BEST!' : `BEST ${best}`, W / 2, 286);
+    // Which ladder this run counts on
+    if (boardResult) {
+      const br = boardResult, rank = br.ranks[br.pure ? 'pure' : 'any'];
+      const label = (br.pure ? '✓ PURE SKILL RUN' : 'ANYTHING GOES RUN') + (rank ? `  ·  #${rank} ON THIS DEVICE` : '');
+      ctx.font = `700 12px ${FONT}`;
+      const cw = ctx.measureText(label).width + 24, col = br.pure ? '#5fe08a' : C.player;
+      ctx.fillStyle = br.pure ? 'rgba(95,224,138,0.14)' : 'rgba(242,193,78,0.14)'; ctx.fillRect(W / 2 - cw / 2, 296, cw, 22);
+      ctx.strokeStyle = col; ctx.lineWidth = 1; ctx.strokeRect(W / 2 - cw / 2 + 0.5, 296.5, cw - 1, 21);
+      ctx.fillStyle = col; ctx.fillText(label, W / 2, 311);
+    }
     ctx.font = `700 12px ${FONT}`; ctx.fillStyle = C.player;
     const notes = [];
     if (newSkins.length) notes.push(`SKIN UNLOCKED: ${newSkins.join(', ').toUpperCase()}`);
     if (earnedToken) notes.push(`+1 CONTINUE TOKEN FOR ${RUNS_PER_TOKEN} RUNS PLAYED`);
     else notes.push(`${RUNS_PER_TOKEN - runsPlayed % RUNS_PER_TOKEN} MORE RUNS TO A FREE TOKEN`);
-    notes.forEach((n, i) => { ctx.globalAlpha = n.startsWith('+') || n.startsWith('SKIN') ? 1 : 0.6; ctx.fillText(n, W / 2, 326 + i * 16); });
+    notes.forEach((n, i) => { ctx.globalAlpha = n.startsWith('+') || n.startsWith('SKIN') ? 1 : 0.6; ctx.fillText(n, W / 2, 338 + i * 16); });
     ctx.globalAlpha = 1;
-    uiBtn(60, 362, W - 120, 46, 'PLAY AGAIN', startPlay, 'primary');
-    uiBtn(60, 416, (W - 128) / 2, 36, 'MENU', toMenu, 'ghost');
-    uiBtn(68 + (W - 128) / 2, 416, (W - 128) / 2, 36, 'SHARE', () => { state = 'share'; }, 'ghost');
+    uiBtn(60, 376, W - 120, 46, runMode === 'pure' ? (pureLeft() > 0 ? `PLAY AGAIN · ${pureLeft()} TOKEN${pureLeft() === 1 ? '' : 'S'} LEFT` : 'GET MORE TOKENS') : 'PLAY AGAIN', replay, 'primary');
+    uiBtn(60, 430, (W - 128) / 2, 36, 'MENU', toMenu, 'ghost');
+    uiBtn(68 + (W - 128) / 2, 430, (W - 128) / 2, 36, 'SHARE', () => { state = 'share'; }, 'ghost');
   }
 
   function drawShare() {
@@ -1552,7 +1680,7 @@
     ctx.font = `700 22px ${FONT}`; ctx.fillText('AD PLACEHOLDER', W / 2, 290);
     ctx.font = `600 13px ${FONT}`; ctx.fillText('A real rewarded ad will play here', W / 2, 316);
     ctx.fillStyle = C.player; ctx.font = `700 16px ${FONT}`;
-    ctx.fillText(adPurpose === 'token' ? `Your token arrives in ${Math.ceil(adLeft)}…` : `Back in the fight in ${Math.ceil(adLeft)}…`, W / 2, 470);
+    ctx.fillText(adPurpose !== 'revive' ? `Your token arrives in ${Math.ceil(adLeft)}…` : `Back in the fight in ${Math.ceil(adLeft)}…`, W / 2, 470);
   }
 
   // ---------- Input ----------
@@ -1564,7 +1692,7 @@
   addEventListener('keydown', e => {
     audioInit();
     if (e.code === 'Escape' || e.code === 'KeyP') { if (state === 'play') state = 'paused'; else if (state === 'paused') state = 'play'; return; }
-    if ((e.code === 'Enter' || e.code === 'Space') && (state === 'title' || (state === 'over' && !canRevive))) { e.preventDefault(); startPlay(); return; }
+    if ((e.code === 'Enter' || e.code === 'Space') && (state === 'title' || (state === 'over' && !canRevive))) { e.preventDefault(); if (state === 'title') startPlay(); else replay(); return; }
     const map = { ArrowUp: [1, 0], Space: [1, 0], Enter: [1, 0], ArrowLeft: [1, -1], ArrowRight: [1, 1], ArrowDown: [-1, 0] };
     if (e.code in map) { e.preventDefault(); keyDash(...map[e.code]); }
     const digit = { Digit1: 'jam', Digit2: 'guard', Digit3: 'armor' }[e.code];
@@ -1586,7 +1714,7 @@
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
-  window.__game = { get tokens() { return tokens; }, get runs() { return runsPlayed; }, get state() { return state; }, get hint() { return hint; }, get skin() { return skin; }, get score() { return score; }, get flankers() { return flankers; }, get camY() { return camY; }, get pickups() { return pickups; }, get jam() { return jam; }, get guard() { return guard; }, get flankerAlive() { return flankers.length > 0; }, get player() { return player; }, get armor() { return armor; }, get rate() { return attackRate(); }, get inv() { return inv; }, get turrets() { return turrets; }, get best() { return [best, bestRate]; }, covers() { return liveCovers(camY, camY + H).map(c => ({ cx: c.cx, cy: c.cy, pts: c.pts, shape: c.shape, hp: c.hp })); }, path: findPath, gates() { return rows.map(r => r.gate).filter(Boolean); }, get boost() { return [boostEnd, boostBlink]; }, forceGate() { const r = score + 1, row = rowAt(r), lane = [0, 1, 2].find(l => !row.covers.some(c => c.lane === l) && !rowAt(score).covers.some(c => c.lane === l)); if (lane === undefined) return null; row.gate = { x: LANES[lane], y: -r * GAP + 100, used: false, charged: false, chargeT: 0 }; return row.gate; } };
+  window.__game = { get tokens() { return tokens; }, get runs() { return runsPlayed; }, get state() { return state; }, get hint() { return hint; }, get skin() { return skin; }, get score() { return score; }, get flankers() { return flankers; }, get camY() { return camY; }, get pickups() { return pickups; }, get jam() { return jam; }, get guard() { return guard; }, get flankerAlive() { return flankers.length > 0; }, get player() { return player; }, get armor() { return armor; }, get rate() { return attackRate(); }, get inv() { return inv; }, get turrets() { return turrets; }, get best() { return [best, bestRate]; }, covers() { return liveCovers(camY, camY + H).map(c => ({ cx: c.cx, cy: c.cy, pts: c.pts, shape: c.shape, hp: c.hp })); }, path: findPath, get boardResult() { return boardResult; }, useStock, get pureLeft() { return pureLeft(); }, get mode() { return runMode; }, rateAt(v) { const s0 = score; score = v; const r = attackRate(); score = s0; return r; }, kill() { if (state === "play") hitPlayer(); }, gates() { return rows.map(r => r.gate).filter(Boolean); }, get boost() { return [boostEnd, boostBlink]; }, forceGate() { const r = score + 1, row = rowAt(r), lane = [0, 1, 2].find(l => !row.covers.some(c => c.lane === l) && !rowAt(score).covers.some(c => c.lane === l)); if (lane === undefined) return null; row.gate = { x: LANES[lane], y: -r * GAP + 100, used: false, charged: false, chargeT: 0 }; return row.gate; } };
 })();
 </script>
 </body></html>
