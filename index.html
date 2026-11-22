@@ -139,7 +139,7 @@
   let splashT = SPLASH_TIME;
   try { if (localStorage.getItem('coverdash-nosplash')) splashT = 0; } catch (e) {}   // used by automated tests
   let state = 'title';   // title (main menu) | play | paused | dying | over | ad | share | store | skins | settings | boards | pure
-  let beams = [], ghostPassed = false, ghostFlashT = 0, newMedal = null, runMode = 'any', boardResult = null, boardLadder = 'pure', boardScope = 'region', boostEnd = 0, boostBlink = 0, adUsed, tokensUsed, earnedToken, adPurpose, sharePlatform, scorePop, bestFlashT, passedBest, newSkins, firstRun, revived, reviveMul, invuln, adLeft, deathRate, canRevive, firstPowerRow, rows, nextFork, player, armor, pickups, jam, guard, guardCd, drone, turrets, flankers, flankTimer, lastFlankShot, gameT, bullets, parts, camY, score, shake, flash, overAt, newBest;
+  let beams = [], pops = [], invFlash = { jam: 0, guard: 0, armor: 0 }, ghostPassed = false, ghostFlashT = 0, newMedal = null, runMode = 'any', boardResult = null, boardLadder = 'pure', boardScope = 'region', boostEnd = 0, boostBlink = 0, adUsed, tokensUsed, earnedToken, adPurpose, sharePlatform, scorePop, bestFlashT, passedBest, newSkins, firstRun, revived, reviveMul, invuln, adLeft, deathRate, canRevive, firstPowerRow, rows, nextFork, player, armor, pickups, jam, guard, guardCd, drone, turrets, flankers, flankTimer, lastFlankShot, gameT, bullets, parts, camY, score, shake, flash, overAt, newBest;
 
   // ---------- Settings (kept between sessions) ----------
   const settings = { sfx: true, music: true, vibe: true };
@@ -440,7 +440,7 @@
     side: 'Side attacker! Get out of its line, or hide on the far side of cover.',
     marked: 'Marked cover drops a power-up when it gets destroyed.',
     gate: 'Speed gate! A turret shot charges it. Then run through for a 10-cover boost.',
-    pickup: 'Tap the glowing power-up to use it!',
+    pickup: 'Power-up collected! Tap it at the bottom left to use it.',
   };
   let seenHints = {}, hint = null, slowMo = 0;
   try { seenHints = JSON.parse(localStorage.getItem('coverdash-hints') || '{}'); } catch (e) {}
@@ -706,7 +706,7 @@
     flankers = []; flankTimer = rand(5, 7); lastFlankShot = -9; gameT = 0;
     revived = false; reviveMul = 1; invuln = 0; canRevive = false;
     adUsed = false; tokensUsed = 0; earnedToken = false; scorePop = 0; bestFlashT = 0; passedBest = false; newSkins = []; hint = null;
-    pickups = []; beams = []; boardResult = null; boostEnd = 0; boostBlink = 0; jam = 0; guard = 0; guardCd = 0; drone = 0;
+    pickups = []; beams = []; pops = []; boardResult = null; boostEnd = 0; boostBlink = 0; jam = 0; guard = 0; guardCd = 0; drone = 0;
     camY = player.y - PLAYER_SCREEN_Y;
     score = 0; shake = 0; flash = 0; newBest = false;
     syncTurrets();
@@ -863,9 +863,11 @@
   const saveInv = () => { try { localStorage.setItem('coverdash-inv', JSON.stringify(inv)); } catch (e) {} };
   const SLOT = k => ({ x: 26 + k * 38, y: H - 72, r: 16 });
 
+  // A power-up can't be used while the same one is still running (armor: while already at the 2-stack max)
+  const stockBlocked = type => (type === 'jam' && jam > 0) || (type === 'guard' && guard > 0) || (type === 'armor' && armor >= ARMOR_MAX);
   function useStock(type) {
     if (state !== 'play' || inv[type] <= 0 || runMode === 'pure') return;   // Pure Skill: no items
-    if (type === 'armor' && armor >= ARMOR_MAX) return;   // don't waste one when already full
+    if (stockBlocked(type)) return;
     inv[type] -= 1; saveInv();
     activate({ type, x: player.x, y: player.y });
   }
@@ -993,6 +995,9 @@
     scorePop = Math.max(0, (scorePop || 0) - dt * 4);
     bestFlashT = Math.max(0, (bestFlashT || 0) - dt);
     ghostFlashT = Math.max(0, ghostFlashT - dt);
+    for (const pp of pops) { pp.t -= dt; pp.y -= 40 * dt; }
+    pops = pops.filter(pp => pp.t > 0);
+    for (const k in invFlash) invFlash[k] = Math.max(0, invFlash[k] - dt * 1.5);
     // brief slow motion when a tutorial hint pops up, or when you're hit
     if (slowMo > 0) { slowMo -= dt; dt *= 0.4; }
     if (state === 'ad') {
@@ -1165,7 +1170,12 @@
                 shake = Math.max(shake, 5);
                 burst(s.cx, s.cy, C.concrete, 12, 200, 7);   // chunky debris
                 sfx('coverBreak'); vibrate(20);
-                if (s.power) { pickups.push({ type: s.power, x: s.cx, y: s.cy, life: PICKUP_LIFE }); showHint('pickup', true); }
+                // Auto-collect: a marked cover's power-up goes straight into your stock, so you never have to stop for it
+                if (s.power) {
+                  inv[s.power] += 1; saveInv(); invFlash[s.power] = 1;
+                  pops.push({ x: s.cx, y: s.cy, text: `+1 ${POWER[s.power].label}`, col: POWER[s.power].color, t: 1.2 });
+                  sfx('power'); showHint('pickup', true);
+                }
               }
               break;
             }
@@ -1322,6 +1332,11 @@
         ctx.beginPath(); ctx.arc(g.x, g.y, GATE_HALF + 30 * (1 - g.chargeT / 0.6), 0, Math.PI * 2); ctx.stroke();
       }
       ctx.globalAlpha = 1;
+    }
+    // "+1 JAM" pops where a marked cover breaks
+    for (const pp of pops) {
+      ctx.globalAlpha = Math.min(1, pp.t * 1.5); ctx.fillStyle = pp.col; ctx.font = `700 15px ${FONT}`; ctx.textAlign = 'center';
+      ctx.fillText(pp.text, pp.x, pp.y); ctx.globalAlpha = 1;
     }
     // Ghost line: where your best daily Pure Skill run ended today
     if (runMode === 'pure' && dailyBest() > 0 && (state === 'play' || state === 'paused' || state === 'dying')) {
@@ -1755,8 +1770,12 @@
   function drawInventory() {
     if (state !== 'play' || !INV_KEYS.some(k => inv[k] > 0)) return;
     INV_KEYS.forEach((k, i) => {
-      const sl = SLOT(i), col = POWER[k].color, has = inv[k] > 0;
-      ctx.globalAlpha = has ? 1 : 0.3;
+      const sl = SLOT(i), col = POWER[k].color, has = inv[k] > 0, blocked = stockBlocked(k);
+      ctx.globalAlpha = has && !blocked ? 1 : 0.3;
+      if (invFlash[k] > 0) {   // just collected: the slot pulses
+        ctx.globalAlpha = 1; ctx.strokeStyle = col; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(sl.x, sl.y, sl.r + 4 + 8 * (1 - invFlash[k]), 0, Math.PI * 2); ctx.stroke();
+      }
       ctx.fillStyle = '#141a24'; ctx.beginPath(); ctx.arc(sl.x, sl.y, sl.r, 0, Math.PI * 2); ctx.fill();
       ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(sl.x, sl.y, sl.r, 0, Math.PI * 2); ctx.stroke();
       powerGlyph(k, sl.x, sl.y, 7, col);
@@ -1952,7 +1971,7 @@
   }
   requestAnimationFrame(frame);
   Ads.init(); Store.init();
-  window.__game = { get tokens() { return tokens; }, get runs() { return runsPlayed; }, get state() { return state; }, get hint() { return hint; }, get skin() { return skin; }, get score() { return score; }, get flankers() { return flankers; }, get camY() { return camY; }, get pickups() { return pickups; }, get jam() { return jam; }, get guard() { return guard; }, get flankerAlive() { return flankers.length > 0; }, get player() { return player; }, get armor() { return armor; }, get rate() { return attackRate(); }, get inv() { return inv; }, get turrets() { return turrets; }, get best() { return [best, bestRate]; }, covers() { return liveCovers(camY, camY + H).map(c => ({ cx: c.cx, cy: c.cy, pts: c.pts, shape: c.shape, hp: c.hp })); }, path: findPath, get boardResult() { return boardResult; }, useStock, get pureLeft() { return pureLeft(); }, get mode() { return runMode; }, layout() { return rows.slice(0, 20).map(r => r.covers.map(c => c.shape + '@' + c.lane + ':' + c.pts[0].map(Math.round).join(',')).join('|')).join(' / '); }, rateAt(v) { const s0 = score; score = v; const r = attackRate(); score = s0; return r; }, kill() { if (state === "play") hitPlayer(); }, gates() { return rows.map(r => r.gate).filter(Boolean); }, get boost() { return [boostEnd, boostBlink]; }, forceGate() { const r = score + 1, row = rowAt(r), lane = [0, 1, 2].find(l => !row.covers.some(c => c.lane === l) && !rowAt(score).covers.some(c => c.lane === l)); if (lane === undefined) return null; row.gate = { x: LANES[lane], y: -r * GAP + 100, used: false, charged: false, chargeT: 0 }; return row.gate; } };
+  window.__game = { get tokens() { return tokens; }, get runs() { return runsPlayed; }, get state() { return state; }, get hint() { return hint; }, get skin() { return skin; }, get score() { return score; }, get flankers() { return flankers; }, get camY() { return camY; }, get pickups() { return pickups; }, get jam() { return jam; }, get guard() { return guard; }, get flankerAlive() { return flankers.length > 0; }, get player() { return player; }, get armor() { return armor; }, get rate() { return attackRate(); }, get inv() { return inv; }, get turrets() { return turrets; }, get best() { return [best, bestRate]; }, covers() { return liveCovers(camY, camY + H).map(c => ({ cx: c.cx, cy: c.cy, pts: c.pts, shape: c.shape, hp: c.hp })); }, path: findPath, get boardResult() { return boardResult; }, useStock, get pureLeft() { return pureLeft(); }, get mode() { return runMode; }, layout() { return rows.slice(0, 20).map(r => r.covers.map(c => c.shape + '@' + c.lane + ':' + c.pts[0].map(Math.round).join(',')).join('|')).join(' / '); }, rateAt(v) { const s0 = score; score = v; const r = attackRate(); score = s0; return r; }, kill() { if (state === "play") hitPlayer(); }, gates() { return rows.map(r => r.gate).filter(Boolean); }, get invFlash() { return invFlash; }, stockBlocked, markAhead() { const cs = liveCovers(camY, camY + H); for (const c of cs) { c.power = "jam"; c.hp = 1; } return cs.length; }, get boost() { return [boostEnd, boostBlink]; }, forceGate() { const r = score + 1, row = rowAt(r), lane = [0, 1, 2].find(l => !row.covers.some(c => c.lane === l) && !rowAt(score).covers.some(c => c.lane === l)); if (lane === undefined) return null; row.gate = { x: LANES[lane], y: -r * GAP + 100, used: false, charged: false, chargeT: 0 }; return row.gate; } };
 })();
 </script>
 </body></html>
