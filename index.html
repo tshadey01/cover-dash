@@ -222,7 +222,150 @@
   // ---------- Continue tokens ("quarters"): stocked between runs ----------
   // Ads: the real app asks the ad network here. The revive offer only appears once an ad has loaded,
   // so a player never taps a button that leads nowhere. There are no forced ads between runs.
-  const adReady = () => true;
+  // ---------- Real ads (AdMob) and purchases (Google Play) in the phone app ----------
+  // The web version keeps the simulated ad and free test purchases. In the app, these talk to the
+  // real services. Swap the test IDs below for the real ones from AdMob and Play Console before launch.
+  const ADMOB = {
+    testing: true,                                         // set false with real IDs
+    rewarded: 'ca-app-pub-3940256099942544/5224354917',    // Google's official test rewarded ad
+    interstitial: 'ca-app-pub-3940256099942544/1033173712' // Google's official test interstitial
+  };
+  const PRODUCTS = {   // Play Console product IDs (create these with the same IDs)
+    noads: { id: 'remove_ads', owned: true }, neon: { id: 'skin_neon', owned: true },
+    tokens: { id: 'continue_tokens_4' }, pack: { id: 'power_pack' },
+    jam: { id: 'jam_5' }, guard: { id: 'guard_5' }, armor: { id: 'armor_5' }, pure: { id: 'pure_token' },
+  };
+  // Forced ads (Gee's call): game over only, at most every 4 normal runs and 3+ minutes apart,
+  // none in a player's first 5 runs, skipped after a rewarded ad, never in Pure Skill or with Remove Ads.
+  const FORCED_EVERY = 4, FORCED_GAP = 180, FORCED_GRACE = 5;
+  const CAP = window.Capacitor;
+  const NATIVE = !!(CAP && CAP.isNativePlatform && CAP.isNativePlatform());
+  const Ads = {
+    on: false, A: null, rewardedReady: false, interReady: false, pending: null,
+    async init() {
+      if (!NATIVE || !CAP.registerPlugin) return;
+      const A = CAP.registerPlugin('AdMob');
+      try {
+        await A.initialize({ initializeForTesting: ADMOB.testing });
+        try {   // privacy consent (Europe and other regions that require it)
+          const ci = await A.requestConsentInfo();
+          if (ci.isConsentFormAvailable && ci.status === 'REQUIRED') await A.showConsentForm();
+        } catch (e) {}
+        this.A = A; this.on = true;
+        A.addListener('onRewardedVideoAdLoaded', () => { this.rewardedReady = true; });
+        A.addListener('onRewardedVideoAdFailedToLoad', () => { this.rewardedReady = false; setTimeout(() => this.loadRewarded(), 30000); });
+        A.addListener('onRewardedVideoAdReward', () => { if (this.pending) this.pending.rewarded = true; });
+        A.addListener('onRewardedVideoAdDismissed', () => setTimeout(() => this.finishRewarded(), 250));
+        A.addListener('onRewardedVideoAdFailedToShow', () => this.finishRewarded());
+        A.addListener('interstitialAdLoaded', () => { this.interReady = true; });
+        A.addListener('interstitialAdFailedToLoad', () => { this.interReady = false; setTimeout(() => this.loadInter(), 60000); });
+        A.addListener('interstitialAdDismissed', () => { this.interReady = false; this.loadInter(); });
+        this.loadRewarded(); this.loadInter();
+      } catch (e) { this.on = false; }
+    },
+    loadRewarded() { this.rewardedReady = false; this.A.prepareRewardVideoAd({ adId: ADMOB.rewarded, isTesting: ADMOB.testing }).catch(() => {}); },
+    loadInter() { if (noAds) return; this.interReady = false; this.A.prepareInterstitial({ adId: ADMOB.interstitial, isTesting: ADMOB.testing }).catch(() => {}); },
+    showRewarded(onDone) {   // onDone(true) only if the player watched to the reward
+      this.pending = { onDone, rewarded: false }; this.rewardedReady = false;
+      this.A.showRewardVideoAd().catch(() => this.finishRewarded());
+    },
+    finishRewarded() {
+      const p = this.pending; this.pending = null;
+      if (this.A) this.loadRewarded();
+      if (p) p.onDone(p.rewarded);
+    },
+    showInter() { if (this.interReady) { this.interReady = false; this.A.showInterstitial().catch(() => this.loadInter()); return true; } return false; },
+  };
+  // Builds without the ad plugin (web, playtest APK) keep the 5-second placeholder ad.
+  const adReady = () => (Ads.on ? Ads.rewardedReady : true);
+  let forced = { runs: 0, at: 0 };
+  try { forced = Object.assign(forced, JSON.parse(localStorage.getItem('coverdash-forced') || '{}')); } catch (e) {}
+  const saveForced = () => { try { localStorage.setItem('coverdash-forced', JSON.stringify(forced)); } catch (e) {} };
+  const nowS = () => Date.now() / 1000;
+  function maybeForcedAd() {
+    if (!Ads.on || noAds || runMode === 'pure') return;
+    forced.runs += 1; saveForced();
+    if (runsPlayed < FORCED_GRACE || forced.runs < FORCED_EVERY || nowS() - forced.at < FORCED_GAP) return;
+    setTimeout(() => { if (state === 'over' && Ads.showInter()) { forced.runs = 0; forced.at = nowS(); saveForced(); } }, 700);
+  }
+
+  const Store = {
+    on: false, S: null, delivered: {},
+    init() {
+      if (!NATIVE) return;
+      document.addEventListener('deviceready', () => {
+        const C2 = window.CdvPurchase;
+        if (!C2) return;
+        const { store, ProductType, Platform } = C2;
+        try { this.delivered = JSON.parse(localStorage.getItem('coverdash-delivered') || '{}'); } catch (e) {}
+        store.register(Object.values(PRODUCTS).map(p => ({ id: p.id, type: p.owned ? ProductType.NON_CONSUMABLE : ProductType.CONSUMABLE, platform: Platform.GOOGLE_PLAY })));
+        store.when()
+          .approved(t => {
+            const key = t.transactionId || '';
+            if (!this.delivered[key]) {
+              for (const pr of t.products) { const k = Object.keys(PRODUCTS).find(k => PRODUCTS[k].id === pr.id); if (k) deliver(k); }
+              if (key) { this.delivered[key] = 1; try { localStorage.setItem('coverdash-delivered', JSON.stringify(this.delivered)); } catch (e) {} }
+            }
+            t.finish();
+          })
+          .receiptUpdated(() => this.syncOwned());
+        store.initialize([Platform.GOOGLE_PLAY]).then(() => { this.on = true; this.syncOwned(); });
+        this.S = store;
+      }, false);
+    },
+    syncOwned() {   // one-time unlocks follow what Google Play says you own
+      if (!this.S) return;
+      if (this.S.owned(PRODUCTS.noads.id) && !noAds) deliver('noads', true);
+      if (this.S.owned(PRODUCTS.neon.id) && !skinsOwned.neon) deliver('neon', true);
+    },
+    price(key, fallback) {
+      const p = this.on && this.S.get(PRODUCTS[key].id);
+      return (p && p.pricing && p.pricing.price) || fallback;
+    },
+    order(key) {
+      const p = this.S.get(PRODUCTS[key].id), offer = p && p.getOffer();
+      if (!offer) { toast = 'Store unavailable. Try again soon'; toastT = 2; return; }
+      this.S.order(offer).then(err => { if (err && err.code !== C2code('PAYMENT_CANCELLED')) { toast = 'Purchase failed'; toastT = 2; } });
+    },
+    restore() { if (this.S) this.S.restorePurchases().then(() => { this.syncOwned(); toast = 'Purchases restored'; toastT = 2; }); },
+  };
+  const C2code = name => (window.CdvPurchase && window.CdvPurchase.ErrorCode && window.CdvPurchase.ErrorCode[name]);
+  // One place that hands out what a purchase or test unlock gives
+  function deliver(key, quiet) {
+    if (key === 'noads') { noAds = true; try { localStorage.setItem('coverdash-noads', '1'); } catch (e) {} if (!quiet) toast = 'Ads removed. Thank you!'; }
+    else if (key === 'neon') { skinsOwned.neon = 1; try { localStorage.setItem('coverdash-skins', JSON.stringify(skinsOwned)); } catch (e) {} if (!quiet) { applyTheme('neon'); toast = 'Neon Grid unlocked'; } }
+    else if (key === 'tokens') { tokens += 4; saveTokens(); toast = 'Added 4 continue tokens'; }
+    else if (key === 'pure') { pureDay(); pure.bought = 1; savePure(); toast = 'Got 1 Pure Skill play token'; }
+    else if (key === 'pack') { for (const k of INV_KEYS) inv[k] += 5; saveInv(); toast = 'Added 5 of each power-up'; }
+    else { inv[key] += 5; saveInv(); toast = `Added 5 ${POWER[key].label}`; }
+    toastT = 2;
+  }
+  // Buy: real store in the app, free test unlock on the web
+  // Builds without the store plugin (web, playtest APK) unlock for free as a test. With the plugin, never free.
+  function purchase(key) {
+    if (Store.on) return Store.order(key);
+    if (NATIVE && window.CdvPurchase) { toast = 'Store unavailable. Try again soon'; toastT = 2; return; }
+    deliver(key);
+  }
+  // Rewarded ad: real ad in the app, 5-second placeholder on the web
+  function startAd(purpose, onFail) {
+    if (Ads.on) {
+      if (!Ads.rewardedReady) { toast = 'No ad available right now. Try again soon'; toastT = 2; if (onFail) onFail(); return; }
+      adPurpose = purpose;
+      Ads.showRewarded(ok => { if (ok) { forced.at = nowS(); forced.runs = 0; saveForced(); grantAd(purpose); } else if (onFail) onFail(); });
+      return;
+    }
+    adPurpose = purpose; state = 'ad'; adLeft = AD_SECONDS;
+  }
+  function grantAd(purpose) {
+    if (purpose === 'token') {
+      if (adTokenDay !== today()) { adTokenDay = today(); adTokensToday = 0; }
+      adTokensToday += 1; tokens += 1; saveTokens();
+      state = 'store'; toast = 'Got 1 continue token'; toastT = 2;
+    } else if (purpose === 'pure') {
+      pureDay(); pure.ad = 1; savePure(); state = 'pure'; toast = 'Got 1 Pure Skill play token'; toastT = 2;
+    } else revive();
+  }
   const TOKENS_PER_RUN = 2;     // most tokens usable in one run, on top of the free ad revive
   const AD_TOKENS_PER_DAY = 3;
   const RUNS_PER_TOKEN = 10;
@@ -745,10 +888,9 @@
     if (id === 'back') { toMenu(); return; }
     if (id === 'noads') {
       if (noAds) { toast = 'Ads already removed'; toastT = 2; return; }
-      noAds = true; try { localStorage.setItem('coverdash-noads', '1'); } catch (e) {}
-      toast = 'Ads removed'; toastT = 2; return;
+      purchase('noads'); return;
     }
-    if (id === 'tokens') { tokens += 4; saveTokens(); toast = 'Added 4 continue tokens'; toastT = 2; return; }
+    if (id === 'tokens') { purchase('tokens'); return; }
     if (id === 'adtoken') {
       if (adTokensLeft() <= 0) { toast = 'No more free tokens today'; toastT = 2; return; }
       if (noAds) {   // Remove Ads owners claim their 3 daily tokens without watching anything
@@ -756,11 +898,9 @@
         adTokensToday += 1; tokens += 1; saveTokens();
         toast = 'Got 1 continue token'; toastT = 2; return;
       }
-      adPurpose = 'token'; state = 'ad'; adLeft = AD_SECONDS; return;
+      startAd('token'); return;
     }
-    if (id === 'pack') { for (const k of INV_KEYS) inv[k] += 5; toast = 'Added 5 of each power-up'; }
-    else { inv[id] += 5; toast = `Added 5 ${POWER[id].label}`; }
-    saveInv(); toastT = 2;
+    purchase(id);   // pack, jam, guard, armor
   }
 
   function activate(p) {
@@ -811,6 +951,7 @@
     overAt = performance.now();
     // Every run counts on Anything Goes. Runs with no stocked items and no continues also count on Pure Skill.
     // Pure Skill runs count on both ladders (they're strictly harder); normal runs count on Anything Goes.
+    maybeForcedAd();
     const pure = runMode === 'pure';
     boardResult = { pure, ranks: Boards.submit(score, pure ? ['pure', 'any'] : ['any']), prevBest: best, prevDaily: pure ? dailyBest() : 0 };
     if (pure && score > dailyBest()) { daily = { day: utcDay(), best: score }; try { localStorage.setItem('coverdash-daily', JSON.stringify(daily)); } catch (e) {} }
@@ -856,15 +997,7 @@
     if (slowMo > 0) { slowMo -= dt; dt *= 0.4; }
     if (state === 'ad') {
       adLeft -= dt;
-      if (adLeft <= 0) {
-        if (adPurpose === 'token') {
-          if (adTokenDay !== today()) { adTokenDay = today(); adTokensToday = 0; }
-          adTokensToday += 1; tokens += 1; saveTokens();
-          state = 'store'; toast = 'Got 1 continue token'; toastT = 2;
-        } else if (adPurpose === 'pure') {
-          pureDay(); pure.ad = 1; savePure(); state = 'pure'; toast = 'Got 1 Pure Skill play token'; toastT = 2;
-        } else revive();
-      }
+      if (adLeft <= 0) grantAd(adPurpose);
       return;
     }
     if (state === 'play' || state === 'dying') {
@@ -1508,12 +1641,12 @@
     if (!pure.ad) {
       uiBtn(60, y, W - 120, 44, noAds ? 'CLAIM +1 TOKEN' : 'WATCH AD FOR +1', () => {
         if (noAds) { pureDay(); pure.ad = 1; savePure(); toast = 'Got 1 Pure Skill play token'; toastT = 2; }
-        else { adPurpose = 'pure'; state = 'ad'; adLeft = AD_SECONDS; }
+        else startAd('pure');
       }, 'ghost', noAds ? 'Free with Remove Ads · once a day' : 'Once a day');
       y += 52;
     }
     if (!pure.bought) {
-      uiBtn(60, y, W - 120, 44, `BUY +1 TOKEN · ${PURE_PRICE}`, () => { pureDay(); pure.bought = 1; savePure(); toast = 'Bought 1 play token (simulated)'; toastT = 2; }, 'ghost', 'Once a day');
+      uiBtn(60, y, W - 120, 44, `BUY +1 TOKEN · ${Store.price('pure', PURE_PRICE)}`, () => purchase('pure'), 'ghost', 'Once a day');
       y += 52;
     }
     ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(238,241,246,0.45)'; ctx.font = `600 11px ${FONT}`;
@@ -1580,7 +1713,7 @@
       const x = 28, y = 128 + i * 66, w = W - 56, h = 58, open = skinUnlocked(t), on = skin === t.id;
       uiHits.push({ x, y, w, h, action: () => {
         if (open) { applyTheme(t.id); return; }
-        if (t.price) { skinsOwned[t.id] = 1; try { localStorage.setItem('coverdash-skins', JSON.stringify(skinsOwned)); } catch (e) {} applyTheme(t.id); toast = `Bought ${t.name} (simulated)`; toastT = 2; }
+        if (t.price) purchase(t.id);
       } });
       ctx.fillStyle = on ? 'rgba(238,241,246,0.12)' : 'rgba(238,241,246,0.05)'; ctx.fillRect(x, y, w, h);
       ctx.strokeStyle = on ? C.player : 'rgba(238,241,246,0.25)'; ctx.lineWidth = on ? 2 : 1; ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
@@ -1595,7 +1728,7 @@
       ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.font = `700 16px ${FONT}`;
       ctx.fillText(t.name, x + 106, y + 25);
       ctx.font = `600 12px ${FONT}`; ctx.fillStyle = on ? C.player : 'rgba(238,241,246,0.6)';
-      const status = on ? 'EQUIPPED' : open ? 'Tap to equip' : t.price ? `${t.price} · tap to buy (test mode)` : `Reach ${t.score} to unlock`;
+      const status = on ? 'EQUIPPED' : open ? 'Tap to equip' : t.price ? `${Store.price(t.id, t.price)} · tap to buy${Store.on ? '' : ' (test mode)'}` : `Reach ${t.score} to unlock`;
       ctx.fillText(status, x + 106, y + 43);
     });
     // Medal row: worn on your circle. Earned by reaching a score.
@@ -1637,7 +1770,8 @@
     ctx.textAlign = 'center';
     ctx.fillStyle = C.player; ctx.font = `700 34px ${FONT}`; ctx.fillText('STORE', W / 2, 110);
     ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 12px ${FONT}`;
-    ctx.fillText('TEST MODE · NO REAL PAYMENTS OR ADS', W / 2, 134);
+    if (Store.on) uiBtn(W / 2 - 80, 122, 160, 18, 'RESTORE PURCHASES', () => Store.restore(), 'ghost');
+    else ctx.fillText('TEST MODE · NO REAL PAYMENTS OR ADS', W / 2, 134);
     ctx.fillText('All optional. Every power-up also drops free in-game.', W / 2, 150);
     for (const b of STORE_BTNS) {
       const back = b.id === 'back';
@@ -1648,7 +1782,7 @@
       // price tag
       ctx.fillStyle = C.player; ctx.fillRect(b.x + b.w - 58, b.y + b.h / 2 - 15, 46, 30);
       ctx.fillStyle = '#141a24'; ctx.font = `700 16px ${FONT}`; ctx.textAlign = 'center';
-      ctx.fillText(b.id === 'adtoken' && noAds ? 'FREE' : b.price, b.x + b.w - 35, b.y + b.h / 2 + 6);
+      ctx.fillText(b.id === 'adtoken' ? (noAds ? 'FREE' : 'AD') : Store.price(b.id, b.price), b.x + b.w - 35, b.y + b.h / 2 + 6);
       ctx.textAlign = 'left';
       if (b.id === 'pack') {
         INV_KEYS.forEach((k, i) => powerGlyph(k, b.x + 22 + i * 22, b.y + 24, 7, POWER[k].color));
@@ -1672,7 +1806,7 @@
     ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(238,241,246,0.6)'; ctx.font = `600 12px ${FONT}`;
     ctx.fillText('OR PICK ONE', 32, 243);
     ctx.textAlign = 'center'; ctx.font = `600 12px ${FONT}`;
-    if (toastT > 0) { ctx.fillStyle = C.player; ctx.font = `700 13px ${FONT}`; ctx.fillText(toast + ' (simulated)', W / 2, 568); }
+    if (toastT > 0) { ctx.fillStyle = C.player; ctx.font = `700 13px ${FONT}`; ctx.fillText(toast + (Store.on ? '' : ' (simulated)'), W / 2, 568); }
     else { ctx.fillStyle = C.ink; ctx.fillText(`You have: ${INV_KEYS.map(k => `${POWER[k].label} ${inv[k]}`).join(' · ')} · TOKENS ${tokens}`, W / 2, 568); }
   }
 
@@ -1710,7 +1844,7 @@
       if (!adUsed && (noAds || adReady())) {
         uiBtn(44, y, W - 88, 48, noAds ? 'CONTINUE' : 'WATCH AD TO CONTINUE', () => {
           adUsed = true;
-          if (noAds) revive(); else { adPurpose = 'revive'; state = 'ad'; adLeft = AD_SECONDS; }
+          if (noAds) revive(); else startAd('revive', () => { adUsed = false; });
         }, 'primary', 'Pick up where you left off');
         y += 58;
       }
@@ -1817,6 +1951,7 @@
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
+  Ads.init(); Store.init();
   window.__game = { get tokens() { return tokens; }, get runs() { return runsPlayed; }, get state() { return state; }, get hint() { return hint; }, get skin() { return skin; }, get score() { return score; }, get flankers() { return flankers; }, get camY() { return camY; }, get pickups() { return pickups; }, get jam() { return jam; }, get guard() { return guard; }, get flankerAlive() { return flankers.length > 0; }, get player() { return player; }, get armor() { return armor; }, get rate() { return attackRate(); }, get inv() { return inv; }, get turrets() { return turrets; }, get best() { return [best, bestRate]; }, covers() { return liveCovers(camY, camY + H).map(c => ({ cx: c.cx, cy: c.cy, pts: c.pts, shape: c.shape, hp: c.hp })); }, path: findPath, get boardResult() { return boardResult; }, useStock, get pureLeft() { return pureLeft(); }, get mode() { return runMode; }, layout() { return rows.slice(0, 20).map(r => r.covers.map(c => c.shape + '@' + c.lane + ':' + c.pts[0].map(Math.round).join(',')).join('|')).join(' / '); }, rateAt(v) { const s0 = score; score = v; const r = attackRate(); score = s0; return r; }, kill() { if (state === "play") hitPlayer(); }, gates() { return rows.map(r => r.gate).filter(Boolean); }, get boost() { return [boostEnd, boostBlink]; }, forceGate() { const r = score + 1, row = rowAt(r), lane = [0, 1, 2].find(l => !row.covers.some(c => c.lane === l) && !rowAt(score).covers.some(c => c.lane === l)); if (lane === undefined) return null; row.gate = { x: LANES[lane], y: -r * GAP + 100, used: false, charged: false, chargeT: 0 }; return row.gate; } };
 })();
 </script>
